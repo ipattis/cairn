@@ -9,6 +9,7 @@ mod api;
 mod app;
 mod daily;
 mod launchd;
+mod obsidian;
 mod secrets;
 mod supervisor;
 
@@ -62,10 +63,89 @@ enum Command {
     Profile,
     /// Print the localhost API bearer token.
     Token,
+    /// Manage provider credentials in the macOS Keychain.
+    #[command(subcommand)]
+    Credential(CredentialCommand),
     /// Install and load the launchd user agent.
     InstallAgent,
     /// Unload and remove the launchd user agent.
     UninstallAgent,
+}
+
+#[derive(Subcommand)]
+enum CredentialCommand {
+    /// Which credentials exist. Values are never printed.
+    List,
+    /// Store one credential. The value is read from the terminal, never from an argument:
+    /// anything in argv is visible to every process on the machine through `ps`.
+    Set {
+        /// Keychain service name, e.g. `wikiskill-fireworks`.
+        service: String,
+    },
+    /// Remove one credential from the Keychain.
+    Unset {
+        service: String,
+    },
+}
+
+async fn credential(config_path: &PathBuf, command: CredentialCommand) -> Result<()> {
+    match command {
+        CredentialCommand::List => {
+            // The config decides which keys a run actually needs, so read it if it is there.
+            let (jev, curators) = match Config::load(config_path).await {
+                Ok(config) => (
+                    config.jev.enabled,
+                    matches!(
+                        config.models.maintainer.endpoint,
+                        wikiskill_core::config::Endpoint::BedrockMantle
+                    ) || matches!(
+                        config.models.proposer.endpoint,
+                        wikiskill_core::config::Endpoint::BedrockMantle
+                    ),
+                ),
+                Err(_) => (false, true),
+            };
+            for status in secrets::status(jev, curators).await? {
+                println!(
+                    "{:<26} {:<24} {}{}",
+                    status.service,
+                    status.env,
+                    if status.in_keychain { "set" } else { "MISSING" },
+                    if status.required { "" } else { " (not required by this config)" }
+                );
+            }
+            Ok(())
+        }
+        CredentialCommand::Set { service } => {
+            let spec = secrets::spec_for(&service).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "`{service}` is not one of this daemon's credentials. Known: {}",
+                    secrets::SPECS
+                        .iter()
+                        .map(|s| s.service)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })?;
+            eprintln!("{} — {}", spec.label, spec.purpose);
+            eprintln!("Sets the Keychain item read into {}.", spec.env);
+            // `security` prompts for the value itself, with echo off, twice. The value never
+            // passes through this process, so it cannot be logged here by accident.
+            secrets::write_interactive(&service).await?;
+            println!("stored as `{service}`; a running daemon picks it up on restart");
+            Ok(())
+        }
+        CredentialCommand::Unset { service } => {
+            secrets::spec_for(&service)
+                .ok_or_else(|| anyhow::anyhow!("`{service}` is not one of this daemon's credentials"))?;
+            if secrets::delete(&service).await? {
+                println!("removed `{service}`");
+            } else {
+                println!("`{service}` was not set");
+            }
+            Ok(())
+        }
+    }
 }
 
 #[tokio::main]
@@ -101,6 +181,7 @@ async fn main() -> Result<()> {
             println!("{}", store.ensure_token().await?);
             Ok(())
         }
+        Command::Credential(command) => credential(&config_path, command).await,
         Command::InstallAgent => {
             let binary = std::env::current_exe()?;
             let log_dir = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()))
@@ -132,6 +213,9 @@ async fn init(config_path: &PathBuf, vault: &PathBuf, force: bool) -> Result<()>
     let repo = Repo::open(vault);
     repo.init().await?;
     seed_eval_template(&vault_handle).await?;
+    // The vault is an Obsidian folder as well as a git repo, and the notes link with
+    // [[wikilinks]] — so the folder is configured for that before anyone opens it.
+    obsidian::prepare(vault).await?;
     repo.commit_all("wikiskill: initialise vault layout and eval template")
         .await?;
 
@@ -147,16 +231,16 @@ async fn init(config_path: &PathBuf, vault: &PathBuf, force: bool) -> Result<()>
     println!();
     println!("Next:");
     println!("  1. Set the model IDs in the config (the placeholders are not real IDs).");
-    println!("  2. Add credentials to the Keychain:");
+    println!("  2. Add credentials, from the cockpit's Setup tab or here:");
     for spec in secrets::SPECS {
-        println!(
-            "       security add-generic-password -a \"$USER\" -s {} -w",
-            spec.service
-        );
+        println!("       wikiskilld credential set {}", spec.service);
     }
     println!("  3. Fill in {}/eval/*.jsonl — 30 train, 15 val, 15 test, no overlap.", vault.display());
     println!("  4. `wikiskilld profile` and read the sandbox policy before running anything.");
     println!("  5. `wikiskilld baseline` — the empty-skill score everything is measured against.");
+    println!();
+    println!("Open the vault in Obsidian once, so the cockpit's note links work:");
+    println!("  Obsidian → vault switcher → \"Open folder as vault\" → {}", vault.display());
     Ok(())
 }
 

@@ -21,6 +21,9 @@ struct Daemon {
     base: String,
     token: String,
     http: reqwest::Client,
+    /// Read from the daemon's config at startup so `reveal_vault` needs no argument. A
+    /// "reveal this path" command the webview supplies would be a file browser.
+    vault: PathBuf,
 }
 
 impl Daemon {
@@ -62,6 +65,10 @@ impl Daemon {
         Ok(Self {
             base: format!("http://{bind}"),
             token,
+            vault: config["vault"]
+                .as_str()
+                .map(PathBuf::from)
+                .ok_or_else(|| format!("{} has no vault path", config_path.display()))?,
             http: reqwest::Client::builder()
                 // Long enough for `/v1/baseline`, which runs a whole validation split.
                 .timeout(std::time::Duration::from_secs(3600))
@@ -130,6 +137,34 @@ fn open_obsidian(link: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Opens Obsidian, for the one step the daemon cannot do: registering the vault. Takes no
+/// argument, so this cannot become "launch an application of the webview's choosing".
+#[tauri::command]
+fn launch_obsidian() -> Result<(), String> {
+    let status = std::process::Command::new("/usr/bin/open")
+        .args(["-a", "Obsidian"])
+        .status()
+        .map_err(|e| e.to_string())?;
+    if !status.success() {
+        return Err("could not launch Obsidian. Is it installed in /Applications?".into());
+    }
+    Ok(())
+}
+
+/// Shows the vault in Finder, so the folder picker in Obsidian can be pointed at it. The path
+/// comes from the daemon's config, never from the webview.
+#[tauri::command]
+fn reveal_vault(state: tauri::State<'_, Daemon>) -> Result<String, String> {
+    if state.vault.as_os_str().is_empty() {
+        return Err("no vault is configured".into());
+    }
+    std::process::Command::new("/usr/bin/open")
+        .arg(&state.vault)
+        .status()
+        .map_err(|e| e.to_string())?;
+    Ok(state.vault.display().to_string())
+}
+
 /// Surfaced in the footer so a failure to reach the daemon is diagnosable.
 #[tauri::command]
 fn where_is_the_daemon(state: tauri::State<'_, Daemon>) -> String {
@@ -150,13 +185,20 @@ fn main() {
                     app.manage(Daemon {
                         base: String::new(),
                         token: String::new(),
+                        vault: PathBuf::new(),
                         http: reqwest::Client::new(),
                     });
                 }
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![api, open_obsidian, where_is_the_daemon])
+        .invoke_handler(tauri::generate_handler![
+            api,
+            open_obsidian,
+            launch_obsidian,
+            reveal_vault,
+            where_is_the_daemon
+        ])
         .run(tauri::generate_context!())
         .expect("running the cockpit");
 }

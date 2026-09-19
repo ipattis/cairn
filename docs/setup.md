@@ -6,7 +6,7 @@ macOS only. Everything runs on one machine: a daemon, a vault, and OpenCode.
 
 ```sh
 cargo build --release                       # the daemon
-cargo test --workspace                      # 147 tests, no network needed
+cargo test --workspace                      # 157 tests, no network needed
 (cd apps/cockpit/src-tauri && cargo build)  # the cockpit
 ```
 
@@ -37,14 +37,46 @@ wikiskilld init --vault ~/Vaults/WikiSkill
 ```
 
 This writes `<support dir>/config.json`, creates `raw/ wiki/ skills/ eval/`, makes the first
-commit, generates the API token, and seeds an eval template.
+commit, generates the API token, seeds an eval template, and writes `.obsidian/app.json` so the
+wiki's `[[wikilinks]]` resolve the way the Wiki Maintainer writes them.
 
 `<support dir>` is `~/Library/Application Support/wikiskill/`.
+
+## 3b. Tell Obsidian about the vault
+
+`init` can configure the folder but cannot register it: Obsidian records a vault in its own
+`obsidian.json` when you open one, and there is no supported interface for a program to add an
+entry. So this step is yours, once:
+
+1. Open Obsidian.
+2. In the vault switcher (bottom of the left sidebar), choose **Open folder as vault**.
+3. Select the vault path.
+
+Until you do, `obsidian://` links — the "open in Obsidian" links beside every skill, note and
+proposal — will not open. The cockpit's **Setup** tab shows this state, with a banner on every
+view while the vault is unregistered, and a Re-check button. `GET /v1/obsidian` is the same
+state if you would rather see it from a script.
 
 ## 4. Credentials
 
 Keys live in the Keychain. The daemon reads them once at startup into its own environment;
-the webview never sees them, and only rollout-scoped keys are passed to `opencode serve`.
+the webview never sees a stored value, and only rollout-scoped keys are passed to
+`opencode serve`. Three ways to set one, in order of preference:
+
+```sh
+wikiskilld credential set wikiskill-fireworks   # prompts hidden; the value never enters the daemon
+wikiskilld credential list                      # which are set, which this config requires
+wikiskilld credential unset wikiskill-jev
+```
+
+The cockpit's **Setup** tab does the same thing for anyone not at a terminal: each credential is
+a card with its purpose, whether it is in the Keychain, whether the running daemon has it, and
+whether this config requires it. A value typed there is sent write-only and the field is cleared
+immediately — no endpoint reads a credential back, so a saved key can be replaced but never
+shown. Changing one is refused while a run is active, because that run is already using the old
+key.
+
+Or set the Keychain items directly:
 
 ```sh
 security add-generic-password -a "$USER" -s wikiskill-fireworks -w        # rollouts

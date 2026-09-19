@@ -65,6 +65,15 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/v1/proposals", get(proposals))
         .route("/v1/proposals/{id}/accept", post(accept_proposal))
         .route("/v1/proposals/{id}/reject", post(reject_proposal))
+        // Credentials are write-only over the API: the cockpit can set one and see whether
+        // one exists, and there is no route that returns a value.
+        .route("/v1/credentials", get(credentials))
+        .route(
+            "/v1/credentials/{service}",
+            axum::routing::put(set_credential).delete(delete_credential),
+        )
+        .route("/v1/obsidian", get(obsidian_setup))
+        .route("/v1/obsidian/prepare", post(obsidian_prepare))
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&app),
             authorize,
@@ -527,6 +536,115 @@ async fn reject_proposal(
     }))
 }
 
+// ------------------------------------------------------------------ credentials
+//
+// The rationale's rule is that a credential never reaches the webview. Setting one from the
+// cockpit does not weaken that: values travel inwards only. `GET` reports whether a key
+// exists, never what it is, and there is no endpoint that reads one back.
+
+/// Whether the curator roles need the Mantle key at all, given this config.
+fn curators_need_keychain(app: &App) -> bool {
+    matches!(
+        app.config.models.maintainer.endpoint,
+        wikiskill_core::config::Endpoint::BedrockMantle
+    ) || matches!(
+        app.config.models.proposer.endpoint,
+        wikiskill_core::config::Endpoint::BedrockMantle
+    )
+}
+
+async fn credentials(
+    State(app): State<Arc<App>>,
+) -> ApiResult<Json<Vec<crate::secrets::CredentialStatus>>> {
+    Ok(Json(
+        crate::secrets::status(app.config.jev.enabled, curators_need_keychain(&app)).await?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct SetCredential {
+    value: String,
+}
+
+async fn set_credential(
+    State(app): State<Arc<App>>,
+    Path(service): Path<String>,
+    Json(body): Json<SetCredential>,
+) -> ApiResult<Json<Ack>> {
+    let spec = crate::secrets::spec_for(&service)
+        .ok_or_else(|| not_found(format!("`{service}` is not one of this daemon's credentials")))?;
+    // Mid-run is the one time this is dangerous: rollouts already running would keep the old
+    // key while the impact log records the run as one thing.
+    if app.active_run().await?.is_some() {
+        return Err(bad_request(
+            "a run is active; changing a credential now would leave the run using the old key. \
+             Pause the run first.",
+        ));
+    }
+    crate::secrets::validate_value(&body.value).map_err(|e| bad_request(format!("{e:#}")))?;
+    crate::secrets::write(&service, &body.value).await?;
+    crate::secrets::remember_in_env(spec, &body.value);
+    Ok(Json(Ack {
+        ok: true,
+        detail: format!(
+            "stored in the Keychain as `{service}` and loaded into the daemon as {}. It is not \
+             readable back through this API.",
+            spec.env
+        ),
+    }))
+}
+
+async fn delete_credential(
+    State(app): State<Arc<App>>,
+    Path(service): Path<String>,
+) -> ApiResult<Json<Ack>> {
+    let spec = crate::secrets::spec_for(&service)
+        .ok_or_else(|| not_found(format!("`{service}` is not one of this daemon's credentials")))?;
+    if app.active_run().await?.is_some() {
+        return Err(bad_request(
+            "a run is active; removing a credential now would fail the run mid-iteration. \
+             Pause the run first.",
+        ));
+    }
+    let existed = crate::secrets::delete(&service).await?;
+    crate::secrets::forget_in_env(spec);
+    Ok(Json(Ack {
+        ok: true,
+        detail: if existed {
+            format!("removed `{service}` from the Keychain and from the daemon's environment")
+        } else {
+            format!("`{service}` was not in the Keychain; cleared it from the daemon's environment")
+        },
+    }))
+}
+
+// ------------------------------------------------------------------ obsidian
+
+async fn obsidian_setup(State(app): State<Arc<App>>) -> ApiResult<Json<crate::obsidian::Setup>> {
+    Ok(Json(
+        crate::obsidian::setup(
+            &app.config.vault,
+            app.vault.obsidian_link("wiki/index.md"),
+        )
+        .await?,
+    ))
+}
+
+async fn obsidian_prepare(State(app): State<Arc<App>>) -> ApiResult<Json<Ack>> {
+    let written = crate::obsidian::prepare(&app.config.vault).await?;
+    Ok(Json(Ack {
+        ok: true,
+        detail: if written.is_empty() {
+            "the vault's Obsidian settings were already in place; nothing was changed".into()
+        } else {
+            format!(
+                "wrote .obsidian/app.json ({}). Existing settings were left alone.",
+                written.join(", ")
+            )
+        },
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -585,7 +703,14 @@ mod tests {
         let (status, _) = call(&app, "GET", "/health", None, None).await;
         assert_eq!(status, StatusCode::OK);
 
-        for uri in ["/v1/status", "/v1/config", "/v1/runs", "/v1/proposals"] {
+        for uri in [
+            "/v1/status",
+            "/v1/config",
+            "/v1/runs",
+            "/v1/proposals",
+            "/v1/credentials",
+            "/v1/obsidian",
+        ] {
             let (status, _) = call(&app, "GET", uri, None, None).await;
             assert_eq!(status, StatusCode::UNAUTHORIZED, "{uri} was unprotected");
             let (status, _) = call(&app, "GET", uri, Some("wrong-token"), None).await;
@@ -723,6 +848,107 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("Wiki index"), "{body}");
+    }
+
+    /// The whole point of routing credentials through the daemon: the cockpit learns whether
+    /// a key is set, and cannot learn what it is.
+    #[tokio::test]
+    async fn credentials_are_reported_without_their_values() {
+        let (_d, app) = app().await;
+        let (status, body) = call(&app, "GET", "/v1/credentials", Some(&app.token), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let listed: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+        assert_eq!(listed.len(), crate::secrets::SPECS.len());
+        for entry in &listed {
+            assert!(entry["env"].is_string());
+            assert!(entry["in_keychain"].is_boolean());
+            assert!(
+                entry.get("value").is_none(),
+                "a credential value was serialised out: {entry}"
+            );
+        }
+        // There is no route that reads one back, either.
+        let (status, _) = call(
+            &app,
+            "GET",
+            "/v1/credentials/wikiskill-fireworks",
+            Some(&app.token),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    /// Both of these must fail *before* anything is written to the Keychain.
+    #[tokio::test]
+    async fn a_bad_credential_write_never_reaches_the_keychain() {
+        let (_d, app) = app().await;
+
+        // An unknown service would otherwise be a Keychain write under a caller-chosen name.
+        let (status, body) = call(
+            &app,
+            "PUT",
+            "/v1/credentials/wikiskill-not-a-credential",
+            Some(&app.token),
+            Some(serde_json::json!({ "value": "x" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+        // The mistake an actual person makes: pasting the whole shell line.
+        let (status, body) = call(
+            &app,
+            "PUT",
+            "/v1/credentials/wikiskill-fireworks",
+            Some(&app.token),
+            Some(serde_json::json!({ "value": "export FIREWORKS_API_KEY=fw_abc\n" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("control character"), "{body}");
+    }
+
+    /// The vault is an Obsidian folder, but registering it is the user's step: the cockpit has
+    /// to be able to tell that it has not happened yet.
+    #[tokio::test]
+    async fn obsidian_setup_reports_an_unregistered_vault_and_can_prepare_it() {
+        let (_d, app) = app().await;
+        let (status, body) = call(&app, "GET", "/v1/obsidian", Some(&app.token), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let setup: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            setup["vault_path"].as_str().unwrap(),
+            app.config.vault.display().to_string()
+        );
+        assert_eq!(setup["registered"], serde_json::json!(false));
+        assert!(
+            setup["open_link"].as_str().unwrap().starts_with("obsidian://"),
+            "{body}"
+        );
+        if setup["installed"] == serde_json::json!(true) {
+            // Installed but not registered is the case that needs instructions.
+            assert!(
+                !setup["steps"].as_array().unwrap().is_empty(),
+                "an unregistered vault must come with the steps to fix it: {body}"
+            );
+        }
+
+        let (status, body) = call(
+            &app,
+            "POST",
+            "/v1/obsidian/prepare",
+            Some(&app.token),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let settings: serde_json::Value = serde_json::from_str(
+            &tokio::fs::read_to_string(app.config.vault.join(".obsidian/app.json"))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(settings["useMarkdownLinks"], serde_json::json!(false));
     }
 
     fn urlencoding(s: &str) -> String {

@@ -82,7 +82,7 @@ person, and every accepted change is a commit that can be reverted from the cock
 
 ## State of the build
 
-147 tests pass with no network and no credentials (`cargo test --workspace`), and the cockpit
+157 tests pass with no network and no credentials (`cargo test --workspace`), and the cockpit
 compiles (`cd apps/cockpit/src-tauri && cargo build`). Bedrock's own runtime is behind a
 non-default feature: `cargo test -p wikiskill-core --features bedrock`.
 

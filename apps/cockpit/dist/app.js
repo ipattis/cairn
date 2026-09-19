@@ -468,6 +468,158 @@ async function saveSchedules() {
   }
 }
 
+// ---------------------------------------------------------------- setup: obsidian
+
+// Rendered in the banner and in the Setup tab from the same daemon response, so the two can
+// never disagree about whether the vault is registered.
+let obsidianState = null;
+
+async function refreshObsidian() {
+  obsidianState = await json("GET", "/v1/obsidian");
+  renderObsidianBanner();
+
+  const rows = [
+    el("div", { class: "card" }, [
+      el("div", { class: "row" }, [
+        el("h3", { text: obsidianState.vault_name || "vault" }),
+        chip(obsidianState.installed ? "Obsidian installed" : "Obsidian not found", obsidianState.installed ? "ok" : "bad"),
+        chip(obsidianState.registered ? "vault registered" : "vault not registered", obsidianState.registered ? "ok" : "warn"),
+        chip(obsidianState.prepared ? "settings written" : "settings not written", obsidianState.prepared ? "ok" : "warn"),
+      ]),
+      el("p", { class: "path", text: obsidianState.vault_path }),
+      obsidianState.registered
+        ? obsidian(obsidianState.open_link, "open the wiki in Obsidian")
+        : null,
+    ]),
+  ];
+
+  if (obsidianState.steps.length) {
+    rows.push(
+      el("div", { class: "card" }, [
+        el("h3", { text: "To finish, in Obsidian itself" }),
+        el(
+          "ol",
+          {},
+          obsidianState.steps.map((step) => el("li", { text: step })),
+        ),
+      ]),
+    );
+  }
+  replace("obsidian-state", rows);
+}
+
+function renderObsidianBanner() {
+  const banner = document.getElementById("setup-banner");
+  // Nothing to say once the vault is registered, and a permanent banner trains people to
+  // ignore banners.
+  if (!obsidianState || obsidianState.registered) {
+    banner.classList.add("hidden");
+    banner.textContent = "";
+    return;
+  }
+  banner.classList.remove("hidden");
+  replace("setup-banner", [
+    el("span", {
+      text: obsidianState.installed
+        ? "Obsidian does not know this vault yet, so note links here will not open."
+        : "Obsidian is not installed, so note links here will not open.",
+    }),
+    el("button", { text: "Set it up", on: { click: () => switchTo("setup") } }),
+  ]);
+}
+
+async function prepareObsidian() {
+  try {
+    const ack = await json("POST", "/v1/obsidian/prepare");
+    document.getElementById("footer-right").textContent = ack.detail;
+    await refreshObsidian();
+  } catch (error) {
+    showError(error);
+  }
+}
+
+// ---------------------------------------------------------------- setup: credentials
+
+async function refreshCredentials() {
+  const credentials = await json("GET", "/v1/credentials");
+  replace(
+    "credentials-list",
+    credentials.map((credential) => {
+      const input = el("input", {
+        type: "password",
+        placeholder: credential.in_keychain ? "replace the stored value" : "paste the key",
+        size: "44",
+        autocomplete: "off",
+        spellcheck: "false",
+      });
+      const save = el("button", {
+        class: "primary",
+        text: "Save",
+        on: { click: () => saveCredential(credential, input) },
+      });
+      // Enter is what anyone pasting into a single field will press.
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") saveCredential(credential, input);
+      });
+
+      return el("div", { class: "card" }, [
+        el("div", { class: "row" }, [
+          el("h3", { text: credential.label }),
+          chip(credential.in_keychain ? "in Keychain" : "not set", credential.in_keychain ? "ok" : credential.required ? "bad" : "warn"),
+          credential.in_daemon_env ? chip("loaded in daemon", "ok") : null,
+          chip(credential.required ? "required" : "optional for this config"),
+        ]),
+        el("p", { class: "hint", text: credential.purpose }),
+        el("p", { class: "path", text: `${credential.service} → ${credential.env}` }),
+        el("div", { class: "row" }, [
+          input,
+          save,
+          credential.in_keychain
+            ? el("button", { text: "Remove", on: { click: () => removeCredential(credential) } })
+            : null,
+        ]),
+      ]);
+    }),
+  );
+}
+
+async function saveCredential(credential, input) {
+  const value = input.value;
+  if (!value) {
+    showError(new Error(`nothing to save for ${credential.label}`));
+    return;
+  }
+  try {
+    const ack = await json("PUT", `/v1/credentials/${encodeURIComponent(credential.service)}`, { value });
+    document.getElementById("footer-right").textContent = ack.detail;
+    clearError();
+  } catch (error) {
+    showError(error);
+  } finally {
+    // Cleared whether or not the save worked: a retry should re-paste rather than leave a key
+    // sitting in a DOM node.
+    input.value = "";
+  }
+  await refreshCredentials();
+  await refreshStatus();
+}
+
+async function removeCredential(credential) {
+  try {
+    const ack = await json("DELETE", `/v1/credentials/${encodeURIComponent(credential.service)}`);
+    document.getElementById("footer-right").textContent = ack.detail;
+  } catch (error) {
+    showError(error);
+  }
+  await refreshCredentials();
+  await refreshStatus();
+}
+
+async function refreshSetup() {
+  await refreshObsidian();
+  await refreshCredentials();
+}
+
 // ---------------------------------------------------------------- wiring
 
 const REFRESHERS = {
@@ -478,6 +630,7 @@ const REFRESHERS = {
   patterns: refreshPatterns,
   labels: refreshLabels,
   schedule: refreshSchedule,
+  setup: refreshSetup,
 };
 
 async function refresh() {
@@ -547,8 +700,27 @@ document.getElementById("run-baseline").addEventListener("click", async (event) 
 
 document.getElementById("save-schedules").addEventListener("click", saveSchedules);
 
+document.getElementById("obsidian-recheck").addEventListener("click", () => {
+  refreshObsidian().catch(showError);
+});
+document.getElementById("obsidian-prepare").addEventListener("click", prepareObsidian);
+document.getElementById("obsidian-open-app").addEventListener("click", () => {
+  invoke("launch_obsidian").catch(showError);
+});
+document.getElementById("obsidian-reveal").addEventListener("click", () => {
+  invoke("reveal_vault")
+    .then((path) => (document.getElementById("footer-right").textContent = `revealed ${path}`))
+    .catch(showError);
+});
+
 invoke("where_is_the_daemon").then((base) => {
   document.getElementById("footer-left").textContent = base || "daemon not configured";
+});
+
+// Checked once at startup, whichever tab is open: the banner is the thing that sends a new
+// user to Setup before they wonder why a note link did nothing.
+refreshObsidian().catch(() => {
+  /* the footer already shows why the daemon is unreachable */
 });
 
 refresh();

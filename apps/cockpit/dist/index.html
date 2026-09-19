@@ -15,11 +15,16 @@
         <button data-view="patterns">Patterns</button>
         <button data-view="labels">Labels</button>
         <button data-view="schedule">Schedule</button>
+        <button data-view="setup">Setup</button>
       </nav>
       <span id="status-chip" class="chip">connecting…</span>
     </header>
 
     <main>
+      <!-- Shown until Obsidian knows about the vault: every note link in this window
+           depends on it, so a silent failure would look like the daemon being broken. -->
+      <div id="setup-banner" class="banner hidden"></div>
+
       <section id="view-runs" class="view">
         <div class="bar">
           <button id="start-run" class="primary">Start run</button>
@@ -74,6 +79,35 @@
           the captured diff onto <code>skills/</code> and commits it.
         </p>
         <div id="proposals-list" class="list"></div>
+      </section>
+
+      <section id="view-setup" class="view hidden">
+        <h2>Obsidian vault</h2>
+        <p class="hint">
+          The vault is a git repo and an Obsidian folder at once. This window can configure the
+          folder, but only you can tell Obsidian about it — there is no supported way for a
+          program to add a vault, and <code>obsidian.json</code> belongs to a running app.
+        </p>
+        <div id="obsidian-state" class="list"></div>
+        <div class="bar">
+          <button id="obsidian-recheck" class="primary">Re-check</button>
+          <button id="obsidian-open-app">Open Obsidian</button>
+          <button id="obsidian-reveal">Show vault in Finder</button>
+          <button id="obsidian-prepare">Write vault settings</button>
+        </div>
+
+        <h2>Credentials</h2>
+        <p class="hint">
+          Stored in the macOS Keychain and loaded into the daemon's environment. Values travel
+          one way: there is no endpoint that reads a key back, so nothing here — including this
+          window — can show you a key you have already saved. Replace it if you lose it.
+        </p>
+        <div id="credentials-list" class="list"></div>
+        <p class="hint">
+          Prefer never to have a key in a window at all?
+          <code>wikiskilld credential set &lt;service&gt;</code> prompts in the terminal, with
+          the value going straight from your keyboard to the Keychain.
+        </p>
       </section>
     </main>
 

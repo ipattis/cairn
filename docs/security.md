@@ -40,12 +40,34 @@ and no shell, no network, no fetch.
 - Keys live in the macOS Keychain and are read once at startup into the **daemon's** process
   environment. Nothing returns them: `load_into_env` deliberately reports only which keys were
   found, so a value cannot end up in a log line or an API response by accident.
+- **Credentials are write-only over the API.** `GET /v1/credentials` returns presence, not
+  values — `CredentialStatus` has no value field at all, so there is no serialisation path for
+  one. `PUT` stores and `DELETE` removes; there is no read endpoint, which is why a key you
+  have saved can only be replaced, never shown back to you.
+- A value being stored goes to `security` on **stdin**, never in `argv`, so it is not visible
+  in `ps` to any other process on the machine. It is validated first — empty, over 4096 bytes,
+  untrimmed, or containing a control character is refused before the Keychain is touched, which
+  is what catches a whole `export FIREWORKS_API_KEY=…` line being pasted in.
+- Changing a credential is refused while a run is active. The run already holds the old key in
+  the environment it handed to `opencode serve`; letting the Keychain and that run disagree
+  would make a rollout's result impossible to attribute.
+- `wikiskilld credential set <service>` is the path for anyone who would rather a key never be
+  in a window: it hands the tty to `security`, which does its own hidden double prompt, so the
+  value never enters the daemon process or the webview IPC at all.
 - **Redaction runs before any vault write, any git commit, and any Jev call.** Rule-based
   patterns plus a high-entropy token filter; the counts are recorded in the note's frontmatter
   so a reader can see that redaction happened and how much it caught.
 - The webview never holds a credential, including the daemon's own bearer token. The cockpit's
   Rust side holds the token and relays paths the webview names; `/v1/config` strips
   `daemon.token` from what it returns.
+- The one thing that does cross the webview is a key **inbound**, when it is typed into the
+  Setup tab: it goes into a `password` field, straight out over the IPC on a `PUT`, and the
+  field is cleared in a `finally` whether the save worked or not. Nothing reads it back, and the
+  terminal command above avoids even that.
+- The cockpit's OS-facing commands take no arguments the webview chooses. `launch_obsidian`
+  names Obsidian; `reveal_vault` uses the vault path the Rust side read from the daemon's config
+  at startup. A "reveal this path" or "open this app" command a window rendering model output
+  could parameterise would be a file browser and a launcher.
 
 ## 4. Anything local talking to the daemon
 
