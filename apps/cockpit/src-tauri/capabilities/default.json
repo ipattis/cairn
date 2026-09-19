@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The cockpit only needs its own window and its three relay commands; every capability beyond that is left off deliberately.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

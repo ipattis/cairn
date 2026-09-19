@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>WikiSkill Cockpit</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1>WikiSkill</h1>
+      <nav id="tabs">
+        <button data-view="runs" class="active">Runs</button>
+        <button data-view="gate">Gate</button>
+        <button data-view="skills">Skills</button>
+        <button data-view="patterns">Patterns</button>
+        <button data-view="labels">Labels</button>
+        <button data-view="schedule">Schedule</button>
+      </nav>
+      <span id="status-chip" class="chip">connecting…</span>
+    </header>
+
+    <main>
+      <section id="view-runs" class="view">
+        <div class="bar">
+          <button id="start-run" class="primary">Start run</button>
+          <input id="model-override" placeholder="model id override (optional)" size="34" />
+          <button id="run-baseline">Measure empty-skill baseline</button>
+          <span class="hint" id="run-plan"></span>
+        </div>
+        <div id="runs-list" class="list"></div>
+        <div id="run-detail"></div>
+      </section>
+
+      <section id="view-gate" class="view hidden">
+        <p class="hint">
+          The impact log exactly as it is committed to the vault. One entry per gate
+          outcome, accepted or not.
+        </p>
+        <pre id="impact" class="doc"></pre>
+      </section>
+
+      <section id="view-skills" class="view hidden">
+        <p class="hint">
+          Every active <code>SKILL.md</code> is injected into the agent file each iteration,
+          byte-identical across rollouts. Reverting is a git checkout of one folder.
+        </p>
+        <div id="skills-list" class="list"></div>
+      </section>
+
+      <section id="view-patterns" class="view hidden">
+        <p class="hint">
+          Occurrence counts are kept by the daemon, not by the model: repeated-pattern
+          counting is the thing an LLM is least reliable at.
+        </p>
+        <div id="patterns-list" class="list"></div>
+      </section>
+
+      <section id="view-labels" class="view hidden">
+        <p class="hint">
+          Traces whose automatic labels fell below the confidence floor. Your verdict is
+          recorded beside the note; raw notes themselves are never rewritten.
+        </p>
+        <div id="labels-list" class="list"></div>
+      </section>
+
+      <section id="view-schedule" class="view hidden">
+        <div id="schedule-list" class="list"></div>
+        <div class="bar">
+          <button id="save-schedules" class="primary">Save schedules</button>
+        </div>
+        <h2>Proposals awaiting review</h2>
+        <p class="hint">
+          Daily coding has no validation split, so nothing here was gated. Accepting replays
+          the captured diff onto <code>skills/</code> and commits it.
+        </p>
+        <div id="proposals-list" class="list"></div>
+      </section>
+    </main>
+
+    <footer>
+      <span id="footer-left"></span>
+      <span id="footer-right"></span>
+    </footer>
+
+    <script src="app.js"></script>
+  </body>
+</html>
