@@ -128,19 +128,35 @@ impl TaskSet {
                     anyhow::bail!("a task in {:?} has an empty id", split);
                 }
             }
-            if tasks.len() != split.intended_size() {
-                tracing::warn!(
-                    "{:?} split has {} tasks; the plan's starting size is {}",
-                    split,
-                    tasks.len(),
-                    split.intended_size()
-                );
-            }
         }
         if self.val.is_empty() {
             anyhow::bail!("the validation split is empty; the gate would have nothing to score");
         }
         Ok(())
+    }
+
+    /// Splits that differ from the plan's starting sizes, one note each.
+    ///
+    /// Returned rather than logged because the daemon reloads the task set on every status poll:
+    /// as a `tracing::warn!` inside [`Self::validate`] this produced hundreds of identical lines
+    /// an hour and buried everything a run actually said. The caller logs it once per run.
+    pub fn size_notes(&self) -> Vec<String> {
+        [
+            (Split::Train, &self.train),
+            (Split::Val, &self.val),
+            (Split::Test, &self.test),
+        ]
+        .into_iter()
+        .filter(|(split, tasks)| tasks.len() != split.intended_size())
+        .map(|(split, tasks)| {
+            format!(
+                "{:?} split has {} tasks; the plan's starting size is {}",
+                split,
+                tasks.len(),
+                split.intended_size()
+            )
+        })
+        .collect()
     }
 
     /// One validation task moves the score by this many points — the noise figure the

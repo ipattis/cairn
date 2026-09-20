@@ -22,7 +22,15 @@ use crate::Result;
 
 /// Endpoint paths of the pinned V1 server API.
 pub mod paths {
-    pub const APP: &str = "/app";
+    /// `{"healthy":true,"version":"1.18.31"}`. Note that 1.18 answers *any* unknown path with the
+    /// web UI's HTML at status 200, so a wrong path here does not 404 — it arrives as a JSON
+    /// parse error. That is why [`super::OpencodeClient::info`] insists on the version field.
+    pub const HEALTH: &str = "/global/health";
+    /// How long a health probe may take. Deliberately short and separate from the client's
+    /// hour-long rollout timeout: a server still starting up can accept the connection and then
+    /// never answer, and a readiness loop that inherits the rollout timeout does not poll — it
+    /// blocks on its first attempt for an hour, and the run it was starting stays `queued`.
+    pub const HEALTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
     pub const SESSION: &str = "/session";
     pub fn session_message(id: &str) -> String {
         format!("/session/{id}/message")
@@ -36,10 +44,17 @@ pub struct OpencodeClient {
     http: reqwest::Client,
     base_url: String,
     pinned_version: String,
+    /// The server's own provider id for the deploy model. A property of this executor, not of a
+    /// rollout: every rollout in a run reaches the same model through the same provider.
+    model_provider: String,
 }
 
 impl OpencodeClient {
-    pub fn new(base_url: impl Into<String>, pinned_version: impl Into<String>) -> Result<Self> {
+    pub fn new(
+        base_url: impl Into<String>,
+        pinned_version: impl Into<String>,
+        model_provider: impl Into<String>,
+    ) -> Result<Self> {
         Ok(Self {
             http: reqwest::Client::builder()
                 // A rollout can legitimately run for many minutes; the loop applies its
@@ -48,6 +63,7 @@ impl OpencodeClient {
                 .build()?,
             base_url: base_url.into().trim_end_matches('/').to_string(),
             pinned_version: pinned_version.into(),
+            model_provider: model_provider.into(),
         })
     }
 
@@ -85,17 +101,21 @@ pub fn version_matches(version: &str, pinned: &str) -> bool {
 mod wire {
     use super::*;
 
+    /// `version` is deliberately required: the server answers unknown paths with the web UI, and
+    /// an optional field would let that HTML-shaped miss degrade to `version: "unknown"` instead
+    /// of naming the real problem.
     #[derive(Debug, Deserialize)]
-    pub struct App {
-        #[serde(default)]
-        pub version: Option<String>,
+    pub struct Health {
+        pub version: String,
     }
 
+    /// The working directory is a *query* parameter on this endpoint, not a body field, so it is
+    /// not in this struct. Sent in the body it is silently ignored, and every rollout would run
+    /// in the server's own cwd instead of its own copied workspace — scoring all of them against
+    /// the same tree.
     #[derive(Debug, Serialize)]
     pub struct CreateSession<'a> {
         pub title: &'a str,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub directory: Option<&'a str>,
     }
 
     #[derive(Debug, Deserialize)]
@@ -106,8 +126,18 @@ mod wire {
     #[derive(Debug, Serialize)]
     pub struct PromptRequest<'a> {
         pub agent: &'a str,
-        pub model: &'a str,
+        pub model: ModelRef<'a>,
         pub parts: Vec<Part<'a>>,
+    }
+
+    /// The endpoint takes `{providerID, modelID}`; the body schema sets
+    /// `additionalProperties: false`, so a bare model string is a 400 rather than a fallback.
+    #[derive(Debug, Serialize)]
+    pub struct ModelRef<'a> {
+        #[serde(rename = "providerID")]
+        pub provider_id: &'a str,
+        #[serde(rename = "modelID")]
+        pub model_id: &'a str,
     }
 
     #[derive(Debug, Serialize)]
@@ -264,18 +294,24 @@ impl Executor for OpencodeClient {
     async fn info(&self) -> Result<ExecutorInfo> {
         let body = self
             .http
-            .get(self.url(paths::APP))
+            .get(self.url(paths::HEALTH))
+            .timeout(paths::HEALTH_TIMEOUT)
             .send()
             .await
             .map_err(|e| anyhow::anyhow!("opencode at {} is unreachable: {e}", self.base_url))?
             .error_for_status()?
             .text()
             .await?;
-        let app: wire::App = serde_json::from_str(&body)
-            .map_err(|e| anyhow::anyhow!("opencode: unparseable /app response: {e}"))?;
+        let health: wire::Health = serde_json::from_str(&body).map_err(|e| {
+            anyhow::anyhow!(
+                "opencode: unparseable {} response ({e}); a server that answers here with HTML \
+                 is serving the web UI, which means this path is not in its API",
+                paths::HEALTH
+            )
+        })?;
         Ok(ExecutorInfo {
             name: "opencode".into(),
-            version: app.version.unwrap_or_else(|| "unknown".into()),
+            version: health.version,
         })
     }
 
@@ -283,10 +319,8 @@ impl Executor for OpencodeClient {
         let body = self
             .http
             .post(self.url(paths::SESSION))
-            .json(&wire::CreateSession {
-                title,
-                directory: work_dir.to_str(),
-            })
+            .query(&[("directory", work_dir)])
+            .json(&wire::CreateSession { title })
             .send()
             .await?
             .error_for_status()?
@@ -301,9 +335,16 @@ impl Executor for OpencodeClient {
         let response = self
             .http
             .post(self.url(&paths::session_message(&session.0)))
+            // Same as session creation: the directory belongs in the query string. The session
+            // was created with it, but the prompt endpoint takes it too, and the two disagreeing
+            // is not worth the risk.
+            .query(&[("directory", &spec.work_dir)])
             .json(&wire::PromptRequest {
                 agent: &spec.agent,
-                model: &spec.model,
+                model: wire::ModelRef {
+                    provider_id: &self.model_provider,
+                    model_id: &spec.model,
+                },
                 parts: vec![wire::Part {
                     kind: "text",
                     text: &spec.prompt,

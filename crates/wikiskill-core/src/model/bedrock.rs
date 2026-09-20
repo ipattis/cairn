@@ -31,15 +31,14 @@ impl BedrockClient {
             model_id: model_id.into(),
         })
     }
-}
 
-#[async_trait]
-impl ModelClient for BedrockClient {
-    fn model_id(&self) -> &str {
-        &self.model_id
-    }
-
-    async fn complete(&self, request: &CompletionRequest) -> Result<Completion> {
+    /// One Converse call. Split out from [`ModelClient::complete`] so the request can be rebuilt
+    /// for a retry: the SDK's fluent builder is not reusable once sent.
+    async fn send(
+        &self,
+        request: &CompletionRequest,
+        temperature: Option<f32>,
+    ) -> Result<aws_sdk_bedrockruntime::operation::converse::ConverseOutput> {
         let mut call = self
             .client
             .converse()
@@ -50,10 +49,9 @@ impl ModelClient for BedrockClient {
             call = call.system(bt::SystemContentBlock::Text(system.clone()));
         }
 
-        let mut inference = bt::InferenceConfiguration::builder().max_tokens(
-            i32::try_from(request.max_tokens).unwrap_or(i32::MAX),
-        );
-        if let Some(temperature) = request.temperature {
+        let mut inference = bt::InferenceConfiguration::builder()
+            .max_tokens(i32::try_from(request.max_tokens).unwrap_or(i32::MAX));
+        if let Some(temperature) = temperature {
             inference = inference.temperature(temperature);
         }
         call = call.inference_config(inference.build());
@@ -77,10 +75,44 @@ impl ModelClient for BedrockClient {
             );
         }
 
-        let response = call
-            .send()
+        call.send()
             .await
-            .map_err(|e| anyhow::anyhow!("bedrock converse failed: {}", describe(e)))?;
+            .map_err(|e| anyhow::anyhow!("bedrock converse failed: {}", describe(e)))
+    }
+}
+
+/// Whether a Converse failure is the service refusing `temperature` for this model.
+///
+/// Matched on the message because it is a `ValidationException` like any other — the only thing
+/// distinguishing it is the text the model returned.
+fn rejects_temperature(error: &anyhow::Error) -> bool {
+    let text = error.to_string().to_ascii_lowercase();
+    text.contains("temperature") && (text.contains("deprecated") || text.contains("not support"))
+}
+
+#[async_trait]
+impl ModelClient for BedrockClient {
+    fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    async fn complete(&self, request: &CompletionRequest) -> Result<Completion> {
+        let response = match self.send(request, request.temperature).await {
+            Ok(response) => response,
+            // Newer Claude models on Bedrock reject `temperature` outright rather than ignoring
+            // it. Retrying without it is the honest response: the parameter carries no meaning
+            // for a model that refuses it, and failing instead would throw away a run — the
+            // curators are only reached after a whole iteration of rollouts has been paid for.
+            Err(e) if request.temperature.is_some() && rejects_temperature(&e) => {
+                tracing::warn!(
+                    model = %self.model_id,
+                    "this model rejects `temperature`; retrying without it. Remove \
+                     `temperature` from its config entry to skip the wasted round trip."
+                );
+                self.send(request, None).await?
+            }
+            Err(e) => return Err(e),
+        };
 
         let mut text = String::new();
         let mut tool_calls = Vec::new();
@@ -275,6 +307,30 @@ fn describe<E: std::error::Error>(error: E) -> String {
 mod tests {
     use super::*;
     use crate::model::{Message, ToolCall};
+
+    /// The message is the real one, verbatim, from a run that died on it after a full iteration
+    /// of rollouts had already been paid for.
+    #[test]
+    fn a_rejected_temperature_is_recognised_and_other_failures_are_not() {
+        let real = anyhow::anyhow!(
+            "bedrock converse failed: service error: ValidationException: The model returned \
+             the following errors: `temperature` is deprecated for this model.: \
+             ValidationException: The model returned the following errors: `temperature` is \
+             deprecated for this model."
+        );
+        assert!(rejects_temperature(&real));
+        assert!(rejects_temperature(&anyhow::anyhow!(
+            "ValidationException: temperature is not supported for this model"
+        )));
+        // A throttle or a bad model id must still fail the call: retrying those without
+        // temperature would turn a real error into a second, identical one.
+        assert!(!rejects_temperature(&anyhow::anyhow!(
+            "ThrottlingException: Too many requests"
+        )));
+        assert!(!rejects_temperature(&anyhow::anyhow!(
+            "ValidationException: The provided model identifier is invalid"
+        )));
+    }
 
     #[test]
     fn json_round_trips_through_smithy_documents() {

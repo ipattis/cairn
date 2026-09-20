@@ -91,6 +91,8 @@ impl Verifier {
             work_dir: work_dir
                 .canonicalize()
                 .unwrap_or_else(|_| work_dir.to_path_buf()),
+            // A verifier is a check program in the work tree; it has no agent home.
+            agent_home: None,
             deny_read: self.deny_read.clone(),
             allow_network: self.config.allow_network,
         };

@@ -152,8 +152,12 @@ async fn credential(config_path: &PathBuf, command: CredentialCommand) -> Result
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,wikiskill_core=info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                // The AWS SDK logs the resolved credentials at INFO on every call — the secret
+                // is redacted but the access key id is not, and it lands in a log file that is
+                // not treated as sensitive. It is also two lines per curator call.
+                "info,wikiskill_core=info,aws_config=warn,aws_credential_types=warn".into()
+            }),
         )
         .with_target(false)
         .init();

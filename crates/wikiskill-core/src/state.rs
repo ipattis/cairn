@@ -307,11 +307,16 @@ impl Store {
         Ok(runs)
     }
 
-    /// A run left `Running` by a crash or a reboot is not actually running.
+    /// A run left `Running` or `Queued` by a crash or a reboot is not actually running.
+    ///
+    /// `Queued` belongs here as much as `Running` does: the record is written before the run's own
+    /// task takes over, so anything that stops the daemon in that window — or any failure between
+    /// the two — leaves a run that the cockpit shows as queued forever, with a Pause and a Cancel
+    /// button for a run that nothing will ever pick up.
     pub async fn reconcile_orphans(&self) -> Result<Vec<String>> {
         let mut reconciled = Vec::new();
         for mut run in self.list_runs().await? {
-            if matches!(run.status, RunStatus::Running) {
+            if matches!(run.status, RunStatus::Running | RunStatus::Queued) {
                 run.status = RunStatus::Failed;
                 run.error = Some("the daemon stopped while this run was in progress".into());
                 run.finished = Some(chrono::Utc::now());
@@ -463,6 +468,23 @@ mod tests {
         assert!(loaded.error.unwrap().contains("daemon stopped"));
         // Idempotent.
         assert!(store.reconcile_orphans().await.unwrap().is_empty());
+    }
+
+    /// A run whose record was written but whose task never took over. Observed for real: the
+    /// executor accepted a readiness probe without answering it, so the run sat at `queued` with
+    /// no error and a Pause button, and the daemon refused every later start.
+    #[tokio::test]
+    async fn a_run_that_never_left_the_queue_is_reconciled_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let r = run();
+        assert_eq!(r.status, RunStatus::Queued, "a fresh run starts queued");
+        store.save_run(&r).await.unwrap();
+
+        assert_eq!(store.reconcile_orphans().await.unwrap(), vec!["run-1".to_string()]);
+        let loaded = store.load_run("run-1").await.unwrap();
+        assert_eq!(loaded.status, RunStatus::Failed);
+        assert!(loaded.finished.is_some());
     }
 
     #[tokio::test]

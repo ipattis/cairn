@@ -9,6 +9,13 @@ license.workspace = true
 name = "wikiskilld"
 path = "src/main.rs"
 
+[features]
+default = []
+# Passes through to the core crate, so a daemon whose curators are pinned to `bedrock-runtime`
+# can actually be built. Off by default: it pulls the AWS SDK in, and a Fireworks- or
+# Mantle-only install should not pay for that.
+bedrock = ["wikiskill-core/bedrock"]
+
 [dependencies]
 wikiskill-core = { path = "../wikiskill-core" }
 anyhow = { workspace = true }

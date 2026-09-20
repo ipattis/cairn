@@ -82,12 +82,14 @@ person, and every accepted change is a commit that can be reverted from the cock
 
 ## State of the build
 
-157 tests pass with no network and no credentials (`cargo test --workspace`), and the cockpit
+166 tests pass with no network and no credentials (`cargo test --workspace`), and the cockpit
 compiles (`cd apps/cockpit/src-tauri && cargo build`). Bedrock's own runtime is behind a
 non-default feature: `cargo test -p wikiskill-core --features bedrock`.
 
-Not exercised here, because they need credentials and an installed executor: live rollouts,
-live curator model calls, Jev, and the launchd agent under a real login session. Everything
+Live rollouts have been run: `wikiskilld baseline` drives real sandboxed `opencode serve`
+rollouts against a Fireworks deploy model and returns a validation score with token and cache
+accounting. Still unexercised against real services: the curator model calls, Jev, and the
+launchd agent under a real login session. Everything
 around them is covered by mocks — `MockExecutor`, `ScriptedClient`, `NoIsolation` — so the
 control flow, the gate arithmetic, the rollback ordering and the redaction are all tested; the
 provider wire formats are tested against captured response bodies rather than live services.

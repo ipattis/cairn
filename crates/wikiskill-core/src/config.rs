@@ -124,6 +124,12 @@ pub struct ExecutorConfig {
     /// Cap on rollouts in flight against one server.
     #[serde(default = "default_parallel")]
     pub max_parallel_rollouts: usize,
+    /// The executor's own name for the provider that serves the deploy model. OpenCode keys
+    /// models by `(providerID, modelID)` and its id for Fireworks is `fireworks-ai`, which is
+    /// not the `endpoint` name the daemon uses for its direct calls — so this cannot be derived
+    /// from `models.inference.endpoint` without a hardcoded table that goes stale.
+    #[serde(default = "default_model_provider")]
+    pub model_provider: String,
 }
 
 fn default_opencode_url() -> String {
@@ -140,6 +146,11 @@ fn default_agent_name() -> String {
 }
 fn default_parallel() -> usize {
     4
+}
+fn default_model_provider() -> String {
+    // Daemon-owned, not the executor's catalog id for Fireworks: the daemon declares this
+    // provider itself so a pinned dated model resolves regardless of what the catalog knows.
+    "wikiskill-deploy".to_string()
 }
 
 /// Gate rule. The paper's rule is [`GateRule::Strict`]; the mean-of-two variant is an
@@ -340,6 +351,7 @@ impl Config {
                 agent: default_agent_name(),
                 rollout_home: state_dir.join("rollout-home"),
                 max_parallel_rollouts: default_parallel(),
+                model_provider: default_model_provider(),
             },
             jev: JevConfig::default(),
             r#loop: LoopConfig::default(),

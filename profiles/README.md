@@ -33,6 +33,28 @@ load-bearing:
 Network is allowed only because rollouts call a hosted model; `sandbox.allow_network_for_rollouts`
 turns it off, and a run against a local provider should have it off.
 
+## Four grants that look like padding and are not
+
+Each of these was found by the executor dying in a way that pointed anywhere but the policy.
+They are listed here so nobody tidies them away:
+
+- `(literal "/")` — the root directory itself, which `(subpath "/usr")` does not cover. Without
+  it dyld cannot start **any** binary: the process execs and takes SIGABRT before it can write
+  to stderr, so it reads as the executor crashing on its own. It discloses only the names of
+  the top-level directories.
+- `(subpath "/private/var/db/timezone")` — the executor resolves the local zone during startup
+  and dies of SIGTRAP, again with an empty stderr, when it cannot.
+- The temp directories appear in **both** the readable and the writable set. A process that can
+  write a temp file but not read it back is broken in a way that surfaces as
+  "An unknown error occurred (Unexpected)".
+- `(allow network-inbound)` — binding a port and accepting a connection on it are different
+  operations. The executor is an HTTP server, so with bind alone it starts, then fails its
+  first accept and reports a bare `ServeError`.
+
+A useful way to bisect the next one: a profile with `(allow default)` appended runs — last rule
+wins — so the missing grant can be found by tightening from there rather than guessing at
+operation names. `(deny default)` is silent, so nothing appears in `log show` to help.
+
 ## Changing it
 
 `sandbox.disabled = true` in the config runs rollouts with no isolation at all. The daemon

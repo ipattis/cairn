@@ -50,8 +50,8 @@ impl App {
         let reconciled = store.reconcile_orphans().await?;
         if !reconciled.is_empty() {
             tracing::warn!(
-                "marked {} run(s) failed: they were still `running` when the daemon last \
-                 stopped ({})",
+                "marked {} run(s) failed: they were still `queued` or `running` when the daemon \
+                 last stopped ({})",
                 reconciled.len(),
                 reconciled.join(", ")
             );
@@ -136,10 +136,10 @@ impl App {
         }))
     }
 
+    /// `load` already validates; the status endpoint calls this on every poll, so nothing here
+    /// may log — see [`TaskSet::size_notes`].
     pub async fn task_set(&self) -> Result<TaskSet> {
-        let tasks = TaskSet::load(&self.vault.area_root(wikiskill_core::vault::Area::Eval)).await?;
-        tasks.validate()?;
-        Ok(tasks)
+        TaskSet::load(&self.vault.area_root(wikiskill_core::vault::Area::Eval)).await
     }
 
     /// Starts a run in the background and returns its id. The run outlives any client.
@@ -152,6 +152,9 @@ impl App {
         }
 
         let tasks = self.task_set().await?;
+        for note in tasks.size_notes() {
+            tracing::warn!("{note}");
+        }
         let run_id = format!(
             "run-{}",
             chrono::Local::now().format("%Y%m%d-%H%M%S")
@@ -172,16 +175,36 @@ impl App {
             .await
             .insert(run_id.clone(), Arc::clone(&control));
 
-        // Starting the server here rather than at daemon startup means a machine with no
-        // executor installed can still serve the cockpit and show its runs.
-        self.supervisor.start().await?;
-
         let app = Arc::clone(self);
         let id = run_id.clone();
         tokio::spawn(async move {
+            // Starting the server belongs in here, not in the handler. It is the one slow step
+            // before the run proper, and doing it in the handler put an await that can fail —
+            // or hang — after the run record and the control entry were already created: the
+            // control was never removed, so `active_run` reported this run forever and every
+            // later start was refused, while the run itself sat at `queued` with no error. It
+            // also means a client that disconnects no longer cancels the start.
+            //
+            // Starting it per run rather than at daemon startup means a machine with no
+            // executor installed can still serve the cockpit and show its runs.
             let mut runner = Runner::new(deps, tasks, run, control);
-            if let Err(e) = runner.run_all().await {
+            let result = match app.supervisor.start().await {
+                Ok(()) => runner.run_all().await,
+                Err(e) => Err(e.context("starting the rollout server")),
+            };
+            if let Err(e) = result {
                 tracing::error!(run = %id, "run failed: {e:#}");
+                // The runner records its own failures, but a failure to start the server happens
+                // before it runs at all — without this the record would stay `queued` forever.
+                if runner.run.status != RunStatus::Failed {
+                    runner.run.status = RunStatus::Failed;
+                    runner.run.phase = "failed".into();
+                    runner.run.error = Some(format!("{e:#}"));
+                    runner.run.finished = Some(chrono::Utc::now());
+                    if let Err(e) = app.store.save_run(&runner.run).await {
+                        tracing::error!(run = %id, "recording the failure: {e:#}");
+                    }
+                }
             }
             app.controls.lock().await.remove(&id);
             if let Err(e) = app.supervisor.stop().await {
@@ -195,6 +218,9 @@ impl App {
     /// Measures the empty-skill baseline on validation and test — phase 0's exit criterion.
     pub async fn baseline(self: &Arc<Self>) -> Result<RunState> {
         let tasks = self.task_set().await?;
+        for note in tasks.size_notes() {
+            tracing::warn!("{note}");
+        }
         let deps = self.loop_deps("baseline").await?;
         self.supervisor.start().await?;
 
@@ -231,7 +257,12 @@ impl App {
             self.config.daemon.state_dir.join("profiles"),
         );
         Ok(seatbelt.render(&ProfileRequest {
-            work_dir: self.config.daemon.state_dir.join("work"),
+            // The state dir itself, matching `Supervisor::new`. A `work` subdirectory here would
+            // print a policy narrower than the one rollouts actually run under, which defeats the
+            // point of a reviewable profile — and hides exactly the class of bug that makes the
+            // executor die with an empty stderr.
+            work_dir: self.config.daemon.state_dir.clone(),
+            agent_home: Some(self.config.executor.rollout_home.clone()),
             deny_read: vec![self.config.vault.clone()],
             allow_network: self.config.sandbox.allow_network_for_rollouts,
         }))
@@ -321,5 +352,78 @@ mod tests {
         let deny_vault = profile.rfind("Vault").expect("vault deny block");
         let last_allow = profile.rfind("(allow file-write*").expect("write allows");
         assert!(deny_vault > last_allow, "{profile}");
+    }
+
+    /// A run that cannot start the executor must not hold the slot. This used to leak: the
+    /// control entry was inserted before `supervisor.start()`, and nothing removed it when that
+    /// failed, so `active_run` reported a run that did not exist and every later start was
+    /// refused with "still active" until the daemon was restarted.
+    #[tokio::test]
+    async fn a_run_that_cannot_start_the_executor_releases_the_slot_and_records_why() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = dir.path().join("Vault");
+        let mut config = Config::sample(vault.clone(), dir.path().join("state"));
+        config.sandbox.disabled = true;
+        // A binary that cannot exist, so `supervisor.start()` fails at once. Without this the
+        // test would launch the real `opencode serve` if one is installed, and the run would
+        // carry on into live model calls.
+        config.executor.binary = dir.path().join("no-such-opencode").display().to_string();
+        let config_path = dir.path().join("config.json");
+        config.save(&config_path).await.unwrap();
+        Vault::init(&vault).await.unwrap();
+        Repo::open(&vault).init().await.unwrap();
+        let app = App::load(&config_path).await.unwrap();
+        seed_task_set(&app).await;
+        // `loop_deps` refuses to build a rollout client without this; the secrets tests set it
+        // to their own value under their own lock, and nothing removes it.
+        std::env::set_var("FIREWORKS_API_KEY", "fw-test");
+
+        let id = app.start_run(None).await.unwrap();
+        // Returns before the executor is even reached: starting it is the background task's job.
+        for _ in 0..100 {
+            if app.active_run().await.unwrap().is_none() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(app.active_run().await.unwrap(), None, "the slot is still held");
+
+        let run = app.store.load_run(&id).await.unwrap();
+        assert_eq!(run.status, RunStatus::Failed, "left as {:?}", run.status);
+        let error = run.error.unwrap_or_default();
+        assert!(error.contains("rollout server"), "{error}");
+        assert!(run.finished.is_some());
+
+        // And the slot really is usable again.
+        app.start_run(None).await.unwrap();
+    }
+
+    /// The smallest task set `TaskSet::load` accepts. `Config::sample` points the executor at a
+    /// binary that does not exist, which is what makes the run above fail at the right step.
+    async fn seed_task_set(app: &Arc<App>) {
+        use wikiskill_core::eval::{Expect, Split, Task};
+        let eval = app
+            .vault
+            .area_root(wikiskill_core::vault::Area::Eval);
+        for (split, id) in [
+            (Split::Train, "t0"),
+            (Split::Val, "v0"),
+            (Split::Test, "s0"),
+        ] {
+            wikiskill_core::eval::write_jsonl(
+                &eval.join(split.file_name()),
+                &[Task {
+                    id: id.into(),
+                    prompt: "fix the failing test".into(),
+                    workspace: app.config.daemon.state_dir.join("ws"),
+                    check_program: "/bin/echo".into(),
+                    check_args: vec!["1/1".into()],
+                    expect: Expect::Fraction,
+                    tags: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        }
     }
 }

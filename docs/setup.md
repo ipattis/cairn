@@ -6,12 +6,17 @@ macOS only. Everything runs on one machine: a daemon, a vault, and OpenCode.
 
 ```sh
 cargo build --release                       # the daemon
-cargo test --workspace                      # 157 tests, no network needed
+cargo test --workspace                      # 166 tests, no network needed
 (cd apps/cockpit/src-tauri && cargo build)  # the cockpit
 ```
 
 The cockpit is a separate cargo workspace on purpose, so the daemon's tests do not build
 Tauri's dependency tree.
+
+If any curator model uses the `bedrock-runtime` endpoint, build with `--features bedrock`.
+Without it the daemon refuses to start a run — it constructs every model client, curators
+included, before the first rollout — and the error names the missing feature. It is off by
+default because it pulls in the AWS SDK, which a Fireworks-only install should not pay for.
 
 ## 2. Install the executor, pinned
 
@@ -95,8 +100,32 @@ instead — `aws sso login` or an instance role, not a Keychain item.
 `config.json` ships with placeholders, not real IDs. Set:
 
 - `models.inference` — the deploy model, which runs rollouts. Everything is measured on it.
+  Its `endpoint` must be `fireworks`: rollouts reach their model through the executor, and the
+  only key the executor is given is the Fireworks one.
 - `models.maintainer` and `models.proposer` — the curator models, which are the only thing
-  allowed to see the wiki.
+  allowed to see the wiki. These the daemon calls directly, so they can sit on any endpoint.
+
+On Bedrock, use the **inference profile** id — `global.anthropic.claude-sonnet-5`, not the bare
+`anthropic.claude-sonnet-5`, which Converse rejects as an unknown model. `aws bedrock
+list-inference-profiles` shows which are ACTIVE for your account.
+
+Leave `temperature` **unset** for the newer Claude models: they reject the parameter outright
+(`ValidationException: \`temperature\` is deprecated for this model`) rather than ignoring it.
+The Bedrock client retries once without it and logs a warning, so this costs a wasted round trip
+rather than a run — but a run that dies here has already paid for a full iteration of rollouts,
+so it is worth getting right in the config.
+
+Use the **dated** id, not the undated alias — `…/deepseek-v4-pro-0813`, not `…/deepseek-v4-pro`.
+An alias can be re-pointed under you, which silently changes what every stored score means; and
+in practice an undated alias is often not deployed for a given account at all.
+
+A dated id is frequently missing from the executor's bundled model catalog even while the
+provider serves it. The daemon works around this by declaring the deploy models itself, as a
+custom OpenAI-compatible provider named by `executor.model_provider` (default
+`wikiskill-deploy`) in the rollout server's private config. Declaring a model under the
+catalog's own provider entry does **not** work — that path only overrides models it already
+knows, so an unknown id stays unknown. The API key is written as `{env:FIREWORKS_API_KEY}`,
+never as a value: the rollout can read that file.
 
 ## 6. Write the task set
 

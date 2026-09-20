@@ -53,8 +53,12 @@ impl Default for ProfileConfig {
 /// What a profile is being generated for.
 #[derive(Debug, Clone)]
 pub struct ProfileRequest {
-    /// The only writable subtree (plus temp).
+    /// The only writable subtree (plus temp and `agent_home`).
     pub work_dir: PathBuf,
+    /// The executor's own `HOME`, readable and writable. The daemon owns this directory and
+    /// points the executor at it, so requiring the user to repeat it in `extra_read_paths`
+    /// would be a setup step whose only purpose is to restate something the daemon knows.
+    pub agent_home: Option<PathBuf>,
     /// Paths that must be unreadable. The vault goes here for rollouts: the paper's
     /// ablation shows wiki access for the inference agent lowers final skill quality.
     pub deny_read: Vec<PathBuf>,
@@ -112,6 +116,11 @@ impl Seatbelt {
 
         p.push_str(";; readable: the system, the toolchain and the work tree\n");
         p.push_str("(allow file-read*\n");
+        // The root directory itself, which `(subpath "/usr")` and friends do not cover. Without
+        // it dyld cannot start *any* binary: the process execs and takes SIGABRT before it can
+        // write a word to stderr, which looks like the executor crashing rather than the policy
+        // refusing it. It discloses only the top-level directory names.
+        p.push_str("  (literal \"/\")\n");
         for path in [
             Path::new("/usr"),
             Path::new("/bin"),
@@ -121,19 +130,35 @@ impl Seatbelt {
             Path::new("/opt"),
             Path::new("/private/etc"),
             Path::new("/private/var/db/dyld"),
+            // The local timezone database. Bun resolves the local zone during startup, before it
+            // has a way to report anything: denied, it dies of SIGTRAP with an empty stderr, which
+            // is indistinguishable from the executor crashing on its own.
+            Path::new("/private/var/db/timezone"),
             Path::new("/dev"),
+            // Temp is writable below, and a process that can write a temp file but not read it
+            // back is broken in a way that surfaces as a mystery: bun's startup does exactly
+            // this, and fails with "An unknown error occurred (Unexpected)".
+            Path::new("/private/tmp"),
+            Path::new("/private/var/tmp"),
+            Path::new("/private/var/folders"),
         ] {
             p.push_str(&format!("  (subpath {})\n", quote(path)));
         }
         p.push_str(&format!("  (subpath {})\n", quote(&request.work_dir)));
+        if let Some(home) = &request.agent_home {
+            p.push_str(&format!("  (subpath {})\n", quote(home)));
+        }
         for path in &self.config.extra_read_paths {
             p.push_str(&format!("  (subpath {})\n", quote(path)));
         }
         p.push_str(")\n\n");
 
-        p.push_str(";; writable: the work tree and temp only\n");
+        p.push_str(";; writable: the work tree, the agent's home and temp only\n");
         p.push_str("(allow file-write*\n");
         p.push_str(&format!("  (subpath {})\n", quote(&request.work_dir)));
+        if let Some(home) = &request.agent_home {
+            p.push_str(&format!("  (subpath {})\n", quote(home)));
+        }
         p.push_str("  (subpath \"/private/tmp\")\n");
         p.push_str("  (subpath \"/private/var/tmp\")\n");
         p.push_str("  (subpath \"/private/var/folders\")\n");
@@ -157,7 +182,11 @@ impl Seatbelt {
         }
 
         if request.allow_network {
-            p.push_str("(allow network-outbound)\n(allow network-bind)\n");
+            // `network-inbound` is not redundant with `network-bind`: bind reserves the port,
+            // accepting a connection on it is the inbound operation. The rollout executor is an
+            // HTTP *server*, so without this it binds, then fails its first accept — OpenCode
+            // reports that as a bare `ServeError`.
+            p.push_str("(allow network-outbound)\n(allow network-bind)\n(allow network-inbound)\n");
         } else {
             p.push_str("(deny network*)\n");
         }
@@ -262,6 +291,7 @@ mod tests {
     fn request() -> ProfileRequest {
         ProfileRequest {
             work_dir: PathBuf::from("/tmp/wikiskill/work"),
+            agent_home: None,
             deny_read: vec![PathBuf::from("/Users/x/Vaults/Agents/WikiSkill")],
             allow_network: true,
         }
@@ -277,6 +307,22 @@ mod tests {
         assert!(text.contains("/Users/x/Vaults/Agents/WikiSkill"));
         assert!(text.starts_with("(version 1)\n"));
         assert!(text.contains("(deny default)"));
+    }
+
+    /// Both of these were found the hard way: the executor died with an empty stderr, or with a
+    /// bare `ServeError`, and the profile was the last place anyone looked.
+    #[test]
+    fn the_rollout_profile_grants_what_a_server_on_bun_needs() {
+        let sb = Seatbelt::new(ProfileConfig::default(), "/tmp/profiles");
+        let text = sb.render(&request());
+        assert!(
+            text.contains("(subpath \"/private/var/db/timezone\")"),
+            "bun resolves the local zone at startup and takes SIGTRAP without it"
+        );
+        assert!(
+            text.contains("(allow network-inbound)"),
+            "binding a port is not accepting on it"
+        );
     }
 
     #[test]
@@ -339,6 +385,7 @@ mod tests {
         let sb = Seatbelt::new(ProfileConfig::default(), dir.path().join("profiles"));
         let req = ProfileRequest {
             work_dir: work.canonicalize().unwrap(),
+            agent_home: None,
             deny_read: vec![secret_dir.canonicalize().unwrap()],
             allow_network: false,
         };
@@ -361,5 +408,50 @@ mod tests {
             "sandboxed cat should not read the vault: {}",
             String::from_utf8_lossy(&out.stdout)
         );
+        // It must fail by being *refused*, not by failing to start. A profile too tight to run
+        // anything also passes the assertion above, which is how the missing root read below
+        // went unnoticed.
+        assert!(
+            out.status.code().is_some(),
+            "cat was killed by a signal rather than refused: the profile cannot start a program"
+        );
+    }
+
+    /// The positive control for the profile: a program under it must actually run.
+    ///
+    /// Everything else here asserts that something is denied, and a profile that denies
+    /// *everything* satisfies all of those. Without `(literal "/")` in the readable set, dyld
+    /// cannot start any binary: it execs and takes SIGABRT with nothing on stderr, which reads
+    /// as `opencode serve` crashing rather than as the policy being wrong.
+    #[tokio::test]
+    #[cfg(target_os = "macos")]
+    async fn the_profile_can_actually_start_a_program() {
+        if !Seatbelt::available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("work");
+        tokio::fs::create_dir_all(&work).await.unwrap();
+        let sb = Seatbelt::new(ProfileConfig::default(), dir.path().join("profiles"));
+        let req = ProfileRequest {
+            work_dir: work.canonicalize().unwrap(),
+            agent_home: None,
+            deny_read: vec![],
+            allow_network: false,
+        };
+        let out = sb
+            .command(&req, "/bin/echo", &["started".to_string()])
+            .await
+            .unwrap()
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "a program must run under the generated profile; got {:?} with stderr {:?}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "started");
     }
 }

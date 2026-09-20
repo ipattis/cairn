@@ -42,6 +42,7 @@ impl Supervisor {
         let client = Arc::new(OpencodeClient::new(
             config.executor.base_url.clone(),
             config.executor.pinned_version.clone(),
+            config.executor.model_provider.clone(),
         )?);
         let work_root = config.daemon.state_dir.clone();
         Ok(Self {
@@ -57,12 +58,62 @@ impl Supervisor {
         Arc::clone(&self.client)
     }
 
+    /// Base URL the executor should use for the deploy model.
+    ///
+    /// Only Fireworks is offered here on purpose: the rollout key in the executor's environment
+    /// is the Fireworks one, and the curator endpoints (Bedrock) are deliberately unreachable
+    /// from a rollout.
+    fn deploy_base_url(&self) -> Result<&'static str> {
+        match self.config.models.inference.endpoint {
+            wikiskill_core::config::Endpoint::Fireworks => {
+                Ok(wikiskill_core::model::openai_compat::FIREWORKS_BASE_URL)
+            }
+            other => anyhow::bail!(
+                "models.inference.endpoint is {other:?}, but rollouts reach their model through \
+                 the executor, which is given only the Fireworks key. Point the deploy model at \
+                 fireworks, or extend the rollout provider declaration."
+            ),
+        }
+    }
+
     /// The rollout server's private config directory. Written on every start, so an edit
     /// to the daily-driver config can never leak into rollouts.
     pub async fn write_rollout_config(&self) -> Result<()> {
         let home = &self.config.executor.rollout_home;
         let config_dir = home.join(".config/opencode");
         tokio::fs::create_dir_all(config_dir.join("agent")).await?;
+
+        // The deploy models get their own provider entry rather than relying on the executor's
+        // bundled catalog. A measurement is pinned to a dated model id, and a dated id the
+        // provider serves today is routinely absent from that catalog — and declaring models
+        // under a catalog provider only *overrides* ones it already knows, so an unknown id
+        // stays unknown. A custom OpenAI-compatible provider is the one form that registers it,
+        // which keeps the pin (and so the comparability of scores across runs) intact.
+        let mut models = serde_json::Map::new();
+        let deploy = std::iter::once(&self.config.models.inference)
+            .chain(self.config.models.exploratory.as_ref());
+        for spec in deploy {
+            models.insert(
+                spec.id.clone(),
+                serde_json::json!({ "name": spec.id, "tool_call": true }),
+            );
+        }
+        let mut provider = serde_json::Map::new();
+        provider.insert(
+            self.config.executor.model_provider.clone(),
+            serde_json::json!({
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "WikiSkill deploy models",
+                "options": {
+                    "baseURL": self.deploy_base_url()?,
+                    // Resolved by the executor from its own environment, which holds only the
+                    // rollout key. Writing the key itself here would put a credential in a file
+                    // the rollout can read.
+                    "apiKey": "{env:FIREWORKS_API_KEY}"
+                },
+                "models": models,
+            }),
+        );
 
         // `skill: deny` is the important line: the loop injects every active SKILL.md into
         // the agent file itself, so the native skill tool would both duplicate the
@@ -73,6 +124,7 @@ impl Supervisor {
             "share": "disabled",
             "autoupdate": false,
             "mcp": {},
+            "provider": provider,
             "permission": {
                 "webfetch": "deny",
                 "external_directory": "deny"
@@ -109,6 +161,7 @@ impl Supervisor {
 
         let request = ProfileRequest {
             work_dir: self.work_root.clone(),
+            agent_home: Some(self.config.executor.rollout_home.clone()),
             // The paper's ablation: an inference agent that can read the wiki produces
             // worse skills. The daemon is the only process that touches the vault.
             deny_read: vec![self.config.vault.clone()],
@@ -121,7 +174,12 @@ impl Supervisor {
 
         let home = &self.config.executor.rollout_home;
         tokio::fs::create_dir_all(home).await?;
+        tokio::fs::create_dir_all(&self.work_root).await?;
         command
+            // Otherwise the server inherits the daemon's working directory, which is wherever
+            // the user happened to launch it — a path the sandbox has no reason to allow, and a
+            // cwd the rollout has no business seeing.
+            .current_dir(&self.work_root)
             .env_clear()
             .env("HOME", home)
             .env("XDG_CONFIG_HOME", home.join(".config"))
@@ -151,6 +209,21 @@ impl Supervisor {
     }
 
     async fn wait_until_ready(&self, timeout: Duration) -> Result<()> {
+        // Bounded twice over: the loop's own deadline, and this outer one. The inner deadline is
+        // only consulted *between* attempts, so a single probe that hangs makes it unenforceable —
+        // and a `start()` that never returns is a run that stays `queued` with no error anywhere.
+        match tokio::time::timeout(timeout + Duration::from_secs(5), self.poll_until_ready(timeout))
+            .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(anyhow::anyhow!(
+                "`opencode serve` readiness check hung for more than {timeout:?}; it accepted a \
+                 connection without answering"
+            )),
+        }
+    }
+
+    async fn poll_until_ready(&self, timeout: Duration) -> Result<()> {
         let deadline = tokio::time::Instant::now() + timeout;
         let mut last_error = None;
         while tokio::time::Instant::now() < deadline {
@@ -315,6 +388,33 @@ mod tests {
         assert_eq!(value["permission"]["webfetch"], "deny");
         assert_eq!(value["share"], "disabled");
         assert_eq!(value["mcp"], serde_json::json!({}));
+    }
+
+    /// A pinned, dated model id is often absent from the executor's bundled catalog even when the
+    /// provider serves it. Declaring it keeps the pin — and the measurement — intact.
+    #[tokio::test]
+    async fn the_rollout_config_declares_the_pinned_deploy_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config(dir.path());
+        let supervisor = Supervisor::new(cfg.clone(), Arc::new(NoIsolation)).unwrap();
+        supervisor.write_rollout_config().await.unwrap();
+
+        let text = tokio::fs::read_to_string(
+            cfg.executor.rollout_home.join(".config/opencode/opencode.json"),
+        )
+        .await
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let entry = &value["provider"][&cfg.executor.model_provider];
+        assert!(
+            entry["models"].get(&cfg.models.inference.id).is_some(),
+            "the deploy model must be declared, got {}",
+            entry["models"]
+        );
+        // The rollout can read this file: the key must stay a reference to the environment the
+        // daemon hands the executor, never the value.
+        assert_eq!(entry["options"]["apiKey"], "{env:FIREWORKS_API_KEY}");
+        assert!(!text.contains("sk-"), "no credential belongs in the rollout config");
     }
 
     #[tokio::test]
