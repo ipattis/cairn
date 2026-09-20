@@ -12,6 +12,18 @@ made to try anything the agent can do.
   `/usr/bin/sandbox-exec` with a generated profile: `(deny default)`, the run's own work tree
   writable, temp writable, the system read-only. OpenCode's permission rules are a second
   layer only — bash redirection can bypass its `external_directory` rules.
+- **The executor's permission ruleset opens with allow-all and then denies.** V2 treats an
+  action with no matching rule as **ask**, which for a non-interactive client is a hung turn, so
+  enumerating allowed actions would break the moment V2 or a plugin added one. The denies —
+  `external_directory`, `skill`, `question`, `webfetch`, `websearch` — are what the ruleset is
+  for, and they are sent per session *and* written into the rollout server's own config so the
+  server's title and compaction agents are bound by them too.
+- **The user's real home is listable, not readable.** The profile grants five directory *nodes*
+  (`/Users`, the home, `~/.claude`, `~/Library`, `~/Library/Application Support`) with
+  `(literal …)` rather than `(subpath …)`, because V2 probes two of those paths regardless of the
+  `HOME` it is handed and a denied *parent* turns a harmless ENOENT into an EPERM. A rollout can
+  therefore see the names in the home — including the vault's — and read nothing there. The
+  vault deny is still last.
 - **The vault is denied to rollouts**, in a deny block placed after the allows, because SBPL's
   last matching rule wins. The inference agent must never read `wiki/`: if it could, a skill's
   measured effect would be confounded by the agent having read the notes behind it.
@@ -54,6 +66,11 @@ and no shell, no network, no fetch.
 - `wikiskilld credential set <service>` is the path for anyone who would rather a key never be
   in a window: it hands the tty to `security`, which does its own hidden double prompt, so the
   value never enters the daemon process or the webview IPC at all.
+- **The executor's own server password is generated, not scraped, and never written down.** V2
+  requires HTTP Basic auth; the daemon generates a random password in `Supervisor::new` and passes
+  it in the child's **environment**, never in `argv` where `ps` would publish it, and never into
+  the rollout config file — which the rollout can read. A side benefit: a server left running by
+  an earlier run cannot answer for this daemon.
 - **Redaction runs before any vault write, any git commit, and any Jev call.** Rule-based
   patterns plus a high-entropy token filter; the counts are recorded in the note's frontmatter
   so a reader can see that redaction happened and how much it caught.

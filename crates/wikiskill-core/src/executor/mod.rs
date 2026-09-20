@@ -1,8 +1,10 @@
 //! The executor boundary.
 //!
-//! OpenCode V2 changes the server API, so every call the daemon makes to it goes
-//! through this trait. Swapping in a V2 client, or pi (the runner-up), means writing one
-//! more implementation and nothing else.
+//! Every call the daemon makes to the rollout executor goes through this trait, so a new
+//! executor — pi was the runner-up — or a new major version of OpenCode means writing one
+//! more implementation and nothing else. That has already paid for itself once: V2's API
+//! differs from V1's in authentication, path layout, prompt semantics and where per-session
+//! policy lives, and none of it reached the loop.
 
 pub mod mock;
 pub mod opencode;
@@ -129,7 +131,12 @@ pub trait Executor: Send + Sync {
     /// pinned line.
     async fn info(&self) -> Result<ExecutorInfo>;
 
-    async fn create_session(&self, title: &str, work_dir: &std::path::Path) -> Result<SessionId>;
+    /// Opens a session for one rollout.
+    ///
+    /// Takes the whole spec rather than a title and a directory because that is where the
+    /// executor binds the agent, the model and the permission ruleset: in V2 they are session
+    /// properties, not prompt properties.
+    async fn create_session(&self, spec: &RolloutSpec) -> Result<SessionId>;
 
     /// Sends the prompt and waits for the session to go idle.
     async fn prompt(&self, session: &SessionId, spec: &RolloutSpec) -> Result<()>;
@@ -140,7 +147,7 @@ pub trait Executor: Send + Sync {
 
     /// Create, prompt, fetch, delete. Overridable where an executor can do better.
     async fn run_rollout(&self, spec: &RolloutSpec) -> Result<Transcript> {
-        let session = self.create_session(&spec.title, &spec.work_dir).await?;
+        let session = self.create_session(spec).await?;
         let result = async {
             self.prompt(&session, spec).await?;
             self.transcript(&session).await

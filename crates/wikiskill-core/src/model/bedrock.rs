@@ -5,7 +5,7 @@
 //! a config edit rather than a rewrite.
 //!
 //! This lives behind the non-default `bedrock` feature: the AWS SDK is a large dependency
-//! and the Fireworks/Mantle path needs none of it, so the default build stays light and
+//! and the Fireworks path needs none of it, so the default build stays light and
 //! entirely offline-testable. [`super::client_for`] fails with a rebuild instruction when a
 //! role is pinned to `bedrock-runtime` in a build without the feature.
 

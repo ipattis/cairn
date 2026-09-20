@@ -24,12 +24,16 @@ pub struct SecretSpec {
     pub purpose: &'static str,
 }
 
+/// Why a credential is needed.
+///
+/// There is deliberately no curator variant: both curator roles run on `bedrock-runtime`,
+/// which authenticates through the AWS credential chain rather than a key this daemon
+/// stores. The only Keychain-backed curator endpoint was Bedrock Mantle, which nothing
+/// used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Requirement {
     /// Needed by rollouts, so needed by `opencode serve` too.
     Rollouts,
-    /// Needed by the curator roles in the daemon.
-    Curators,
     /// Only needed when Jev is enabled.
     Jev,
 }
@@ -42,14 +46,6 @@ pub const SPECS: &[SecretSpec] = &[
         label: "Fireworks (deploy model)",
         purpose: "Runs the rollouts. This is the one key `opencode serve` is given, and the \
                   only one that reaches a sandboxed process.",
-    },
-    SecretSpec {
-        service: "wikiskill-bedrock-mantle",
-        env: "BEDROCK_MANTLE_API_KEY",
-        required_for: Requirement::Curators,
-        label: "Bedrock Mantle (curators)",
-        purpose: "Runs the Wiki Maintainer and the Skill Proposer, inside the daemon. Not \
-                  needed when both curator roles are configured for another endpoint.",
     },
     SecretSpec {
         service: "wikiskill-jev",
@@ -83,7 +79,7 @@ pub struct CredentialStatus {
 }
 
 /// Which credentials exist, without reading any of their values out to the caller.
-pub async fn status(jev_enabled: bool, curators_need_keychain: bool) -> Result<Vec<CredentialStatus>> {
+pub async fn status(jev_enabled: bool) -> Result<Vec<CredentialStatus>> {
     let mut out = Vec::new();
     for spec in SPECS {
         out.push(CredentialStatus {
@@ -95,7 +91,6 @@ pub async fn status(jev_enabled: bool, curators_need_keychain: bool) -> Result<V
             in_daemon_env: std::env::var_os(spec.env).is_some(),
             required: match spec.required_for {
                 Requirement::Rollouts => true,
-                Requirement::Curators => curators_need_keychain,
                 Requirement::Jev => jev_enabled,
             },
         });
@@ -271,12 +266,11 @@ pub fn rollout_env() -> Vec<(String, String)> {
 }
 
 /// Names of the keys a run needs but does not have.
-pub fn missing_for(jev_enabled: bool, curators_need_keychain: bool) -> Vec<&'static str> {
+pub fn missing_for(jev_enabled: bool) -> Vec<&'static str> {
     SPECS
         .iter()
         .filter(|spec| match spec.required_for {
             Requirement::Rollouts => true,
-            Requirement::Curators => curators_need_keychain,
             Requirement::Jev => jev_enabled,
         })
         .filter(|spec| std::env::var_os(spec.env).is_none())
@@ -311,8 +305,8 @@ mod tests {
         let _guard = ENV.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("FIREWORKS_API_KEY", "fw");
         std::env::remove_var("JEV_API_KEY");
-        assert!(missing_for(false, false).is_empty());
-        assert_eq!(missing_for(true, false), vec!["JEV_API_KEY"]);
+        assert!(missing_for(false).is_empty());
+        assert_eq!(missing_for(true), vec!["JEV_API_KEY"]);
     }
 
     #[test]

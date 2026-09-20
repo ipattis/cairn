@@ -11,15 +11,17 @@ use serde::{Deserialize, Serialize};
 use crate::Result;
 
 /// Which endpoint a role's model is called through.
+///
+/// The rationale also listed `bedrock-mantle` as a third endpoint, for models only Mantle
+/// serves. Nothing here ever used it — curators go to `bedrock-runtime` through the AWS
+/// credential chain and rollouts go to Fireworks through the executor — so it is gone
+/// rather than carried as an untested path with its own Keychain item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Endpoint {
     /// `bedrock-runtime`: the default for new applications; cross-Region inference
     /// and Guardrails live only here.
     BedrockRuntime,
-    /// `bedrock-mantle`: Mantle-only models, background inference, Projects.
-    /// No Guardrails support.
-    BedrockMantle,
     /// Fireworks AI, OpenAI-compatible.
     Fireworks,
 }
@@ -108,11 +110,13 @@ pub struct ExecutorConfig {
     /// Base URL of the daemon-supervised `opencode serve`.
     #[serde(default = "default_opencode_url")]
     pub base_url: String,
-    /// Path to the `opencode` binary the daemon supervises.
+    /// Path to the OpenCode binary the daemon supervises. `opencode2` rather than `opencode`:
+    /// `@opencode/cli` installs both names, and `opencode` is also what a V1 install is called,
+    /// so the unqualified name is the one that silently resolves to the wrong major version.
     #[serde(default = "default_opencode_bin")]
     pub binary: String,
-    /// Pinned V1 release line. A mismatch is a hard error, not a warning: V2 revises
-    /// the server API.
+    /// Pinned V2 release line. A mismatch is a hard error, not a warning: the whole HTTP
+    /// surface this client speaks is labelled experimental, so a minor bump can move it.
     #[serde(default = "default_opencode_version")]
     pub pinned_version: String,
     /// Name of the rollout agent file the loop regenerates each iteration.
@@ -136,10 +140,10 @@ fn default_opencode_url() -> String {
     "http://127.0.0.1:4096".to_string()
 }
 fn default_opencode_bin() -> String {
-    "opencode".to_string()
+    "opencode2".to_string()
 }
 fn default_opencode_version() -> String {
-    "1.18".to_string()
+    "2.0".to_string()
 }
 fn default_agent_name() -> String {
     "wiki-inference".to_string()
@@ -301,15 +305,6 @@ impl Config {
         }
         if self.executor.max_parallel_rollouts == 0 {
             anyhow::bail!("executor.max_parallel_rollouts must be at least 1");
-        }
-        if self.models.maintainer.endpoint == Endpoint::BedrockMantle
-            || self.models.proposer.endpoint == Endpoint::BedrockMantle
-        {
-            // Not fatal, but worth refusing by default: Mantle has no Guardrails.
-            tracing::warn!(
-                "a curator role is pinned to bedrock-mantle, which does not support \
-                 Bedrock Guardrails"
-            );
         }
         Ok(())
     }

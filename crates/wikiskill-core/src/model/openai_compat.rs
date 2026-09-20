@@ -1,8 +1,7 @@
-//! OpenAI-compatible client for Fireworks and Bedrock Mantle.
+//! OpenAI-compatible client for Fireworks.
 //!
-//! The IAM principal needs `bedrock-mantle:CreateInference` for Mantle; Mantle does not
-//! support Bedrock Guardrails, so any Guardrails policy has to sit on `bedrock-runtime`
-//! traffic instead.
+//! [`OpenAiCompatClient::new`] takes the base URL and key directly, so another
+//! OpenAI-compatible provider is a constructor and nothing else.
 
 use std::time::Duration;
 
@@ -15,7 +14,6 @@ use super::{
 use crate::Result;
 
 pub const FIREWORKS_BASE_URL: &str = "https://api.fireworks.ai/inference/v1";
-pub const MANTLE_BASE_URL_TEMPLATE: &str = "https://bedrock-mantle.{region}.api.aws/v1";
 
 pub struct OpenAiCompatClient {
     http: reqwest::Client,
@@ -55,19 +53,6 @@ impl OpenAiCompatClient {
             .unwrap_or(&model)
             .to_string();
         Self::new("fireworks", FIREWORKS_BASE_URL, key, model)
-    }
-
-    /// Bedrock Mantle as a custom OpenAI-compatible provider.
-    pub fn mantle(model: String) -> Result<Self> {
-        let key = std::env::var("BEDROCK_MANTLE_API_KEY")
-            .map_err(|_| anyhow::anyhow!("BEDROCK_MANTLE_API_KEY is not set"))?;
-        let region = std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".into());
-        let base = MANTLE_BASE_URL_TEMPLATE.replace("{region}", &region);
-        let model = model
-            .strip_prefix("bedrock-mantle/")
-            .unwrap_or(&model)
-            .to_string();
-        Self::new("bedrock-mantle", base, key, model)
     }
 
     /// Builds the wire request. Separated from the HTTP call so the mapping is testable.

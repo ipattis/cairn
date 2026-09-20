@@ -2,7 +2,6 @@
 //! be tested without OpenCode, a provider or a network.
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -30,7 +29,7 @@ pub struct MockExecutor {
 impl MockExecutor {
     pub fn new(responder: Responder) -> Self {
         Self {
-            version: "1.18.4".into(),
+            version: "2.0.11".into(),
             responder,
             calls: Arc::new(Mutex::new(Vec::new())),
             open: Arc::new(Mutex::new(HashMap::new())),
@@ -112,11 +111,14 @@ impl Executor for MockExecutor {
         })
     }
 
-    async fn create_session(&self, title: &str, _work_dir: &Path) -> Result<SessionId> {
+    async fn create_session(&self, spec: &RolloutSpec) -> Result<SessionId> {
         let mut next = self.next_id.lock().unwrap();
         *next += 1;
         let id = format!("ses_{next}");
-        self.open.lock().unwrap().insert(id.clone(), title.into());
+        self.open
+            .lock()
+            .unwrap()
+            .insert(id.clone(), spec.title.clone());
         Ok(SessionId(id))
     }
 

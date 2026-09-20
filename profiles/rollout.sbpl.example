@@ -24,6 +24,12 @@
   (subpath "/private/tmp")
   (subpath "/private/var/tmp")
   (subpath "/private/var/folders")
+  ;; directory nodes only — listable, not readable; see README.md
+  (literal "/Users")
+  (literal "<your home>")
+  (literal "<your home>/.claude")
+  (literal "<your home>/Library")
+  (literal "<your home>/Library/Application Support")
   (subpath "<your home>/Library/Application Support/wikiskill")
   (subpath "<your home>/Library/Application Support/wikiskill/rollout-home")
   (subpath "<your toolchain, from sandbox.extra_read_paths>")

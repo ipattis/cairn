@@ -6,7 +6,7 @@ macOS only. Everything runs on one machine: a daemon, a vault, and OpenCode.
 
 ```sh
 cargo build --release                       # the daemon
-cargo test --workspace                      # 166 tests, no network needed
+cargo test --workspace                      # 172 tests, no network needed
 (cd apps/cockpit/src-tauri && cargo build)  # the cockpit
 ```
 
@@ -20,16 +20,35 @@ default because it pulls in the AWS SDK, which a Fireworks-only install should n
 
 ## 2. Install the executor, pinned
 
-OpenCode **V1, 1.18.x**. V2 revises the server API; the daemon speaks V1 and checks the
-version it finds:
+OpenCode **V2, pinned to 2.0.x**. The daemon speaks only V2 and checks the version it finds,
+refusing anything outside the pinned minor:
 
 ```sh
-npm install -g opencode-ai@1.18
-opencode --version
+npm install -g @opencode/cli
+opencode2 --version
 ```
 
-Every call goes through the `Executor` trait (`crates/wikiskill-core/src/executor/`), so
-moving to V2 is a second implementation, not a rewrite.
+The package installs two binaries, `opencode` and `opencode2`; `executor.binary` defaults to
+`opencode2` so a V1 `opencode` left on `PATH` cannot be picked up by accident. If the install is
+not global, set `executor.binary` to the absolute path — the daemon does not search for it.
+
+Three things about V2 that the daemon handles but that are worth knowing when reading its logs:
+
+- **The server requires HTTP Basic auth.** Username `opencode`; the daemon generates a random
+  password per supervisor and passes it in the child's environment, never in argv, so `ps` does
+  not publish it. A stale server from an earlier run cannot answer for the current daemon.
+- **Prompting is asynchronous.** `POST /api/session/{id}/prompt` returns as soon as the turn is
+  admitted; completion is `POST /api/experimental/session/{id}/wait`, with the `idle` entry in
+  `GET /api/session/{id}/message` as the fallback signal.
+- **Permissions are an ordered array**, `permissions`, not V1's `permission` object, and an action
+  with no matching rule defaults to **ask** — which in a non-interactive client means a stuck
+  turn. The daemon therefore opens with an allow-all rule and denies from there; see
+  `rollout_permissions()` in `crates/wikiskill-core/src/executor/opencode.rs`.
+
+Every call still goes through the `Executor` trait (`crates/wikiskill-core/src/executor/`), but
+there is no V1 implementation behind it any more: V2 changed the server API, the plugin API and
+the config shape, and keeping both would have meant two of everything for a line that is being
+retired.
 
 ## 3. Initialise the vault
 
@@ -84,9 +103,8 @@ key.
 Or set the Keychain items directly:
 
 ```sh
-security add-generic-password -a "$USER" -s wikiskill-fireworks -w        # rollouts
-security add-generic-password -a "$USER" -s wikiskill-bedrock-mantle -w   # curators, if used
-security add-generic-password -a "$USER" -s wikiskill-jev -w              # only if Jev is on
+security add-generic-password -a "$USER" -s wikiskill-fireworks -w   # rollouts
+security add-generic-password -a "$USER" -s wikiskill-jev -w         # only if Jev is on
 ```
 
 An already-set environment variable wins over the Keychain, which is how to run the daemon
@@ -119,13 +137,14 @@ Use the **dated** id, not the undated alias — `…/deepseek-v4-pro-0813`, not 
 An alias can be re-pointed under you, which silently changes what every stored score means; and
 in practice an undated alias is often not deployed for a given account at all.
 
-A dated id is frequently missing from the executor's bundled model catalog even while the
-provider serves it. The daemon works around this by declaring the deploy models itself, as a
-custom OpenAI-compatible provider named by `executor.model_provider` (default
-`wikiskill-deploy`) in the rollout server's private config. Declaring a model under the
-catalog's own provider entry does **not** work — that path only overrides models it already
-knows, so an unknown id stays unknown. The API key is written as `{env:FIREWORKS_API_KEY}`,
-never as a value: the rollout can read that file.
+The daemon declares the deploy models itself rather than relying on whatever the executor's
+bundled catalog happens to know: a `providers` entry named by `executor.model_provider` (default
+`wikiskill-deploy`) in the rollout server's private config, using V2's native
+`@opencode/ai/providers/openai-compatible` package and listing each model with explicit
+`capabilities`. An uncatalogued model would otherwise be given V2's fallback limits.
+
+The key is declared by **name** — `"env": ["FIREWORKS_API_KEY"]` — and never as a value or a
+`{env:…}` template: the rollout can read that file, so nothing credential-shaped goes in it.
 
 ## 6. Write the task set
 
@@ -174,10 +193,14 @@ everything through the daemon. Closing it does not stop a run.
 ## 11. Daily-coding capture (phase 4)
 
 ```sh
-ln -s "$PWD/plugins/opencode-capture/index.js" ~/.config/opencode/plugin/wikiskill-capture.js
+mkdir -p ~/.config/opencode/plugins
+ln -s "$PWD/plugins/opencode-capture/index.js" ~/.config/opencode/plugins/wikiskill-capture.js
 export WIKISKILL_API="http://127.0.0.1:8787"
 export WIKISKILL_API_TOKEN="$(wikiskilld token)"
 ```
+
+`plugins/`, plural — V2's directory. A file in V1's `plugin/` is not an error; it is a plugin
+that silently never loads.
 
 Then enable the nightly maintainer and weekly proposer in the cockpit's Schedule view. They
 default to **off**. The weekly proposer never writes `skills/` on its own: daily work has no

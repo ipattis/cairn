@@ -144,6 +144,21 @@ impl Seatbelt {
         ] {
             p.push_str(&format!("  (subpath {})\n", quote(path)));
         }
+        // Directory *nodes* on the way to two places OpenCode probes in the real home,
+        // regardless of the `HOME` it was handed: `~/.claude`, which it scans for Claude Code
+        // skills and agents, and `~/Library/Application Support`, where its own support
+        // directory would be. Neither exists for the rollout, and "does not exist" is a fine
+        // answer — but only if the parent can be opened. Denied, the parent read fails with
+        // EPERM instead of the child failing with ENOENT, and the difference surfaces as a bare
+        // `500 Internal Server Error` from `POST /api/session/{id}/prompt`, with nothing in the
+        // server log and no sandbox denial in `log show`.
+        //
+        // `(literal)`, not `(subpath)`: this grants a directory listing of each node and nothing
+        // under it, so the rollout learns the *names* in the user's home and no content. The
+        // vault's deny still comes last, so its name is visible and its contents are not.
+        for path in ancestor_nodes(&real_home()) {
+            p.push_str(&format!("  (literal {})\n", quote(&path)));
+        }
         p.push_str(&format!("  (subpath {})\n", quote(&request.work_dir)));
         if let Some(home) = &request.agent_home {
             p.push_str(&format!("  (subpath {})\n", quote(home)));
@@ -278,6 +293,31 @@ pub fn for_host(config: &ProfileConfig, profile_dir: impl Into<PathBuf>) -> Resu
     }
 }
 
+/// The home of the user the daemon runs as — not the rollout's isolated `HOME`.
+fn real_home() -> PathBuf {
+    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()))
+}
+
+/// The two probed paths and every directory between them and the root, deduplicated.
+///
+/// Returned deepest-last only for readability of the generated profile; every entry is an
+/// `allow`, so order within the block does not matter. `/` is omitted because the profile
+/// already grants it.
+fn ancestor_nodes(home: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for probed in [home.join(".claude"), home.join("Library/Application Support")] {
+        let mut chain: Vec<PathBuf> = probed.ancestors().map(PathBuf::from).collect();
+        chain.reverse();
+        for path in chain {
+            if path == Path::new("/") || path.as_os_str().is_empty() || out.contains(&path) {
+                continue;
+            }
+            out.push(path);
+        }
+    }
+    out
+}
+
 fn quote(path: &Path) -> String {
     // SBPL string literals: escape backslashes and quotes.
     let s = path.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
@@ -323,6 +363,39 @@ mod tests {
             text.contains("(allow network-inbound)"),
             "binding a port is not accepting on it"
         );
+    }
+
+    /// The grant that cost the most to find: without it `POST /api/session/{id}/prompt` answers
+    /// `500` with an empty body, no server log line and no sandbox denial anywhere.
+    #[test]
+    fn the_probed_home_nodes_are_listable_but_not_readable() {
+        let nodes = ancestor_nodes(Path::new("/Users/x"));
+        assert_eq!(
+            nodes,
+            vec![
+                PathBuf::from("/Users"),
+                PathBuf::from("/Users/x"),
+                PathBuf::from("/Users/x/.claude"),
+                PathBuf::from("/Users/x/Library"),
+                PathBuf::from("/Users/x/Library/Application Support"),
+            ],
+            "the chain to both probed paths, each node once"
+        );
+
+        let sb = Seatbelt::new(ProfileConfig::default(), "/tmp/profiles");
+        let text = sb.render(&request());
+        for node in ancestor_nodes(&real_home()) {
+            assert!(
+                text.contains(&format!("(literal {})", quote(&node))),
+                "missing node grant for {}",
+                node.display()
+            );
+            assert!(
+                !text.contains(&format!("(subpath {})", quote(&node))),
+                "{} is granted as a subpath, which hands the rollout the whole home",
+                node.display()
+            );
+        }
     }
 
     #[test]

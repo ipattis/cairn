@@ -88,17 +88,7 @@ impl App {
     /// Builds the loop's dependencies for one run. Model clients are built per run so a
     /// config edit takes effect on the next run rather than needing a daemon restart.
     pub async fn loop_deps(&self, run_id: &str) -> Result<Arc<LoopDeps>> {
-        let missing = secrets::missing_for(
-            self.config.jev.enabled,
-            // Mantle uses a Keychain key; Bedrock runtime uses the AWS credential chain.
-            matches!(
-                self.config.models.maintainer.endpoint,
-                wikiskill_core::config::Endpoint::BedrockMantle
-            ) || matches!(
-                self.config.models.proposer.endpoint,
-                wikiskill_core::config::Endpoint::BedrockMantle
-            ),
-        );
+        let missing = secrets::missing_for(self.config.jev.enabled);
         if !missing.is_empty() {
             anyhow::bail!(
                 "missing credentials: {}. Add them to the Keychain (see docs/setup.md) \

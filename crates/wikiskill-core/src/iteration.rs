@@ -432,11 +432,7 @@ impl Runner {
     }
 
     async fn publish_agent_file(&self, skills: &[Skill]) -> Result<()> {
-        let contents = opencode::render_agent_file(
-            &self.deps.config.executor.agent,
-            &self.run.model_id,
-            skills,
-        );
+        let contents = opencode::render_agent_file(&self.deps.config.executor.agent, skills);
         self.deps
             .agent_files
             .publish(&self.deps.config.executor.agent, &contents)
@@ -991,7 +987,13 @@ mod tests {
         // The agent file was regenerated before rollouts, and again before validation.
         let published = f.sink.published.lock().unwrap();
         assert!(published.len() >= 2);
-        assert!(published[0].contains("skill: deny"));
+        // The first publish is the empty-skill baseline: the gate's starting point.
+        assert!(published[0].contains("You have no additional skills"));
+        assert!(
+            !published[0].contains("permission"),
+            "the agent file lives in the rollout's own writable HOME, so policy it states there \
+             is advice; the ruleset travels with the session instead"
+        );
         assert!(published
             .last()
             .unwrap()

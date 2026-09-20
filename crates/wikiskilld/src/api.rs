@@ -542,23 +542,10 @@ async fn reject_proposal(
 // cockpit does not weaken that: values travel inwards only. `GET` reports whether a key
 // exists, never what it is, and there is no endpoint that reads one back.
 
-/// Whether the curator roles need the Mantle key at all, given this config.
-fn curators_need_keychain(app: &App) -> bool {
-    matches!(
-        app.config.models.maintainer.endpoint,
-        wikiskill_core::config::Endpoint::BedrockMantle
-    ) || matches!(
-        app.config.models.proposer.endpoint,
-        wikiskill_core::config::Endpoint::BedrockMantle
-    )
-}
-
 async fn credentials(
     State(app): State<Arc<App>>,
 ) -> ApiResult<Json<Vec<crate::secrets::CredentialStatus>>> {
-    Ok(Json(
-        crate::secrets::status(app.config.jev.enabled, curators_need_keychain(&app)).await?,
-    ))
+    Ok(Json(crate::secrets::status(app.config.jev.enabled).await?))
 }
 
 #[derive(Deserialize)]

@@ -13,8 +13,8 @@ Three parts:
 | `wikiskill-core` | The loop, the gate, the sandbox, the curators, the providers. | `crates/wikiskill-core` |
 | Cockpit | A Tauri window that relays through the daemon. | `apps/cockpit` |
 
-The executor is **OpenCode V1, pinned to 1.18.x**, behind an `Executor` trait. It runs both
-the rollouts and the user's daily coding.
+The executor is **OpenCode V2, pinned to 2.0.x** (`opencode2`), behind an `Executor` trait. It
+runs both the rollouts and the user's daily coding.
 
 See [`docs/setup.md`](docs/setup.md) to install it, [`docs/eval-tasks.md`](docs/eval-tasks.md)
 for the task set that everything is measured against, and

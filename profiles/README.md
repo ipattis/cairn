@@ -33,7 +33,7 @@ load-bearing:
 Network is allowed only because rollouts call a hosted model; `sandbox.allow_network_for_rollouts`
 turns it off, and a run against a local provider should have it off.
 
-## Four grants that look like padding and are not
+## Five grants that look like padding and are not
 
 Each of these was found by the executor dying in a way that pointed anywhere but the policy.
 They are listed here so nobody tidies them away:
@@ -50,10 +50,28 @@ They are listed here so nobody tidies them away:
 - `(allow network-inbound)` — binding a port and accepting a connection on it are different
   operations. The executor is an HTTP server, so with bind alone it starts, then fails its
   first accept and reports a bare `ServeError`.
+- `(literal …)` — not `(subpath …)` — for five directory **nodes** in the user's real home:
+  `/Users`, the home itself, `~/.claude`, `~/Library` and `~/Library/Application Support`.
+  OpenCode probes `~/.claude` (for Claude Code skills and agents) and its own support directory
+  regardless of the `HOME` it was handed. Neither exists for the rollout, and "does not exist"
+  is a fine answer — but only if the parent directory can be opened. Denied, the *parent* read
+  fails with `EPERM` instead of the child failing with `ENOENT`, and the whole thing surfaces as
+  a bare `500 Internal Server Error` from `POST /api/session/{id}/prompt` with an empty body,
+  nothing in the server's own log, and no denial in `log show`. `(literal)` grants a directory
+  listing of each node and nothing beneath it, so the rollout learns the *names* in the home and
+  no content; the vault deny is still last, so the vault's name is visible and its contents are
+  not.
 
 A useful way to bisect the next one: a profile with `(allow default)` appended runs — last rule
 wins — so the missing grant can be found by tightening from there rather than guessing at
 operation names. `(deny default)` is silent, so nothing appears in `log show` to help.
+
+Bisect with `(subpath …)` and `(literal …)`, never with `(regex …)`: regex matching here is
+case-insensitive on this filesystem, so `#"^/Users/me/l"` also matches `~/Library`, and a slice
+that looked eliminated was not. Two rounds of the search above were wasted on that before the
+denies were rewritten as subpaths. And check the node itself as well as its children — a pattern
+requiring a character after the trailing slash never tests the directory, which is exactly what
+the home-node grants above turned out to be about.
 
 ## Changing it
 

@@ -2,8 +2,8 @@
 //!
 //! Two client paths, as the rationale sets out: OpenCode's own config serves rollouts
 //! and daily coding, while the daemon's curator agents call models directly — Bedrock
-//! through the AWS SDK's Converse API, Mantle and Fireworks through an OpenAI-compatible
-//! client with a custom base URL.
+//! through the AWS SDK's Converse API, Fireworks through an OpenAI-compatible client with
+//! a custom base URL.
 
 pub mod openai_compat;
 
@@ -154,9 +154,6 @@ pub async fn client_for(model: &crate::config::ModelRef) -> Result<Box<dyn Model
     use crate::config::Endpoint;
     match model.endpoint {
         Endpoint::Fireworks => Ok(Box::new(openai_compat::OpenAiCompatClient::fireworks(
-            model.id.clone(),
-        )?)),
-        Endpoint::BedrockMantle => Ok(Box::new(openai_compat::OpenAiCompatClient::mantle(
             model.id.clone(),
         )?)),
         #[cfg(feature = "bedrock")]

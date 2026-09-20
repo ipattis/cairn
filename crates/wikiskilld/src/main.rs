@@ -92,20 +92,11 @@ async fn credential(config_path: &PathBuf, command: CredentialCommand) -> Result
     match command {
         CredentialCommand::List => {
             // The config decides which keys a run actually needs, so read it if it is there.
-            let (jev, curators) = match Config::load(config_path).await {
-                Ok(config) => (
-                    config.jev.enabled,
-                    matches!(
-                        config.models.maintainer.endpoint,
-                        wikiskill_core::config::Endpoint::BedrockMantle
-                    ) || matches!(
-                        config.models.proposer.endpoint,
-                        wikiskill_core::config::Endpoint::BedrockMantle
-                    ),
-                ),
-                Err(_) => (false, true),
+            let jev = match Config::load(config_path).await {
+                Ok(config) => config.jev.enabled,
+                Err(_) => false,
             };
-            for status in secrets::status(jev, curators).await? {
+            for status in secrets::status(jev).await? {
                 println!(
                     "{:<26} {:<24} {}{}",
                     status.service,
