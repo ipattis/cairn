@@ -82,18 +82,23 @@ person, and every accepted change is a commit that can be reverted from the cock
 
 ## State of the build
 
-166 tests pass with no network and no credentials (`cargo test --workspace`), and the cockpit
+172 tests pass with no network and no credentials (`cargo test --workspace`), and the cockpit
 compiles (`cd apps/cockpit/src-tauri && cargo build`). Bedrock's own runtime is behind a
 non-default feature: `cargo test -p wikiskill-core --features bedrock`.
 
 Live rollouts have been run: `wikiskilld baseline` drives real sandboxed `opencode serve`
 rollouts against a Fireworks deploy model and returns a validation score with token and cache
-accounting. Still unexercised against real services: the curator model calls, Jev, and the
-launchd agent under a real login session. Everything
-around them is covered by mocks — `MockExecutor`, `ScriptedClient`, `NoIsolation` — so the
+accounting. Bedrock Converse has been exercised live too — that is how the inference-profile id
+requirement and the newer Claude models' rejection of `temperature` were found. Still
+unexercised against real services: Jev, and the launchd agent under a real login session.
+Everything around them is covered by mocks — `MockExecutor`, `ScriptedClient`, `NoIsolation` — so the
 control flow, the gate arithmetic, the rollback ordering and the redaction are all tested; the
 provider wire formats are tested against captured response bodies rather than live services.
 
 Jev ships in **shadow mode** by default: its answers are logged and never acted on. The repeat
 check warns the proposer; it never gates. Occurrence counting stays in Rust, because counting
 is the thing a model is least reliable at.
+
+## License
+
+Dual-licensed under either [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), at your option.
